@@ -1,0 +1,33 @@
+{
+  "name": "noudle-agents-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source, cross-device workspace for persistent collaborating Codex agents.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "pretypecheck": "pnpm --filter @noudle-agents/protocol build && pnpm --filter @noudle-agents/design-tokens build && pnpm --filter @noudle-agents/api-client build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "lint": "pnpm -r --if-present lint",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "dev:api": "pnpm --filter @noudle-agents/api dev",
+    "dev:desktop": "pnpm --filter @noudle-agents/desktop dev",
+    "dev:mobile": "pnpm --filter @noudle-agents/mobile start",
+    "infra:up": "docker compose -f infra/compose/docker-compose.yml up -d --build",
+    "infra:up:mock": "docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.dev.yml up -d postgres api",
+    "infra:up:lan": "docker compose -f infra/compose/docker-compose.yml -f infra/compose/docker-compose.lan.yml up -d --build",
+    "infra:down": "docker compose -f infra/compose/docker-compose.yml down",
+    "infra:logs": "docker compose -f infra/compose/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

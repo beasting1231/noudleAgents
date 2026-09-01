@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Chrome
+Exec=/opt/relay/launch-chromium
+Icon=/opt/relay/chrome-icon.png
+Terminal=false
+StartupNotify=false

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "declaration": false,
+    "declarationMap": false,
+    "exactOptionalPropertyTypes": false,
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "noEmit": true,
+    "types": ["react"]
+  },
+  "include": ["App.tsx", "index.ts", "src/**/*.ts", "src/**/*.tsx"]
+}

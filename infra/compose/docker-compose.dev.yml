@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      RELAY_CODEX_MODE: mock
+
+  codex-worker:
+    profiles: [real-codex]
+
+  sandbox-manager:
+    profiles: [sandbox]

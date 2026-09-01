@@ -1,0 +1,37 @@
+{
+  "name": "@noudle-agents/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "start:web": "expo start --web",
+    "build:web": "expo export --platform web --output-dir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.1.1",
+    "@expo/metro-runtime": "^57.0.14",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@noudle-agents/api-client": "workspace:*",
+    "@noudle-agents/design-tokens": "workspace:*",
+    "@noudle-agents/protocol": "workspace:*",
+    "expo": "^57.0.18",
+    "expo-document-picker": "~57.0.1",
+    "expo-file-system": "~57.0.6",
+    "expo-secure-store": "^57.0.2",
+    "expo-sharing": "~57.0.16",
+    "expo-status-bar": "^57.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-webview": "13.16.1",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "typescript": "~6.0.3",
+    "vitest": "^3.2.7"
+  }
+}

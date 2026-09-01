@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "noudleAgents",
+    "slug": "noudle-agents-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "app.noudleagents.mobile",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "noudleAgents connects to your local agent workspace during development."
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "noudleAgents"
+    },
+    "plugins": ["expo-secure-store"]
+  }
+}

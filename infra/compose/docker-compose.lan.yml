@@ -1,0 +1,9 @@
+services:
+  api:
+    environment:
+      RELAY_COMPUTER_PUBLIC_HOST: ${RELAY_COMPUTER_PUBLIC_HOST:-}
+    ports: !override
+      - "4310:4310"
+  sandbox-manager:
+    ports: !override
+      - "4330:4330"

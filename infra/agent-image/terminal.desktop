@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=xterm -fa Monospace -fs 11 -bg "#0b0d10" -fg "#e8ebee" -geometry 110x32
+Icon=/opt/relay/terminal-icon.png
+Terminal=false
+StartupNotify=false

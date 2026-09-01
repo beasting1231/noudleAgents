@@ -1,0 +1,8 @@
+{
+  "command": [
+    "node",
+    "-e",
+    "const { chromium } = require('playwright'); (async () => { const browser = await chromium.launch({ headless: false }); const page = await browser.newPage({ viewport: { width: 900, height: 560 } }); await page.setContent('<main style=\"font:32px sans-serif;background:#0b0c0e;color:#d7ff64;padding:80px;height:100vh\">noudleAgents Linux browser runtime</main>'); await page.screenshot({ path: '/workspace/browser-proof.png' }); console.log(await page.textContent('main')); await browser.close(); })().catch(error => { console.error(error); process.exit(1); });"
+  ],
+  "timeoutMs": 30000
+}

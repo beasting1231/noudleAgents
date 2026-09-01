@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>noudleAgents Computer</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #090a0c; color: #f4f5ef; }
+      main { width: min(560px, calc(100vw - 64px)); padding: 34px; border: 1px solid #292c31; background: #111316; box-shadow: 0 24px 80px rgb(0 0 0 / 35%); }
+      .mark { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 10px; background: #d7ff64; color: #090a0c; font-weight: 900; }
+      h1 { margin: 26px 0 8px; font-size: 30px; letter-spacing: -0.04em; }
+      p { margin: 0; color: #9da29b; line-height: 1.55; }
+      .status { margin-top: 28px; padding-top: 18px; border-top: 1px solid #292c31; display: flex; gap: 9px; align-items: center; color: #d7ff64; font-size: 13px; font-weight: 700; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 14px currentColor; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">R</div>
+      <h1>Computer ready</h1>
+      <p>This isolated Linux browser is connected to noudleAgents. Watch the agent work, or take control from desktop or iPhone.</p>
+      <div class="status"><span class="dot"></span>Waiting for the next browser action</div>
+    </main>
+  </body>
+</html>

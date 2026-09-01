@@ -1,0 +1,106 @@
+name: relay
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: relay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "127.0.0.1:${RELAY_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - relay-postgres:/var/lib/postgresql/data
+    networks: [relay-control]
+
+  api:
+    build:
+      context: ../..
+      dockerfile: services/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 4310
+      RELAY_DATABASE_URL: postgres://relay:relay@postgres:5432/relay
+      RELAY_DEV_AUTH_TOKEN: ${RELAY_DEV_AUTH_TOKEN:-relay-local-owner}
+      RELAY_AGENT_API_TOKEN: ${RELAY_AGENT_API_TOKEN:-relay-local-agent-token}
+      RELAY_CODEX_WORKER_URL: http://codex-worker:4320
+      RELAY_SANDBOX_MANAGER_URL: http://sandbox-manager:4330
+      RELAY_STORAGE_PATH: /data/artifacts
+      RELAY_INTERNAL_TOKEN: ${RELAY_INTERNAL_TOKEN:-relay-local-internal-token}
+      RELAY_CONNECTOR_SECRET_KEY: ${RELAY_CONNECTOR_SECRET_KEY:-relay-local-connector-secret}
+      RELAY_CODEX_MODE: ${RELAY_CODEX_MODE:-codex}
+      RELAY_AGENT_WORKSPACE_ROOT: agents
+    ports:
+      - "127.0.0.1:4310:4310"
+    volumes:
+      - relay-artifacts:/data/artifacts
+      - ${PWD}/data/workspaces:/data/workspaces
+    networks: [relay-control]
+
+  codex-worker:
+    build:
+      context: ../..
+      dockerfile: services/codex-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_CODEX_WORKER_HOST: 0.0.0.0
+      RELAY_CODEX_WORKER_PORT: 4320
+      RELAY_INTERNAL_TOKEN: ${RELAY_INTERNAL_TOKEN:-relay-local-internal-token}
+      RELAY_CODEX_MODEL: ${RELAY_CODEX_MODEL:-}
+      RELAY_CODEX_REASONING_EFFORT: ${RELAY_CODEX_REASONING_EFFORT:-medium}
+      RELAY_WORKSPACE_PATH: /workspace
+      RELAY_CODEX_HOME: /home/relay/.codex
+      RELAY_COLLABORATION_MCP_SCRIPT: /app/services/collaboration-mcp/dist/server.js
+      RELAY_API_URL: http://api:4310
+      RELAY_AGENT_API_TOKEN: ${RELAY_AGENT_API_TOKEN:-relay-local-agent-token}
+    volumes:
+      - ${PWD}/data/workspaces:/workspace
+      - relay-codex-home:/home/relay/.codex
+    networks: [relay-control]
+
+  sandbox-manager:
+    build:
+      context: ../..
+      dockerfile: services/sandbox-manager/Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_SANDBOX_HOST: 0.0.0.0
+      RELAY_SANDBOX_PORT: 4330
+      RELAY_INTERNAL_TOKEN: ${RELAY_INTERNAL_TOKEN:-relay-local-internal-token}
+      RELAY_WORKSPACE_PATH: ${PWD}/data/workspaces
+      RELAY_AGENT_IMAGE: relay-agent-sandbox:local
+      RELAY_DOCKER_NETWORK: relay-runtime
+      RELAY_DOCKER_ISOLATED_NETWORK: relay-runtime-isolated
+      RELAY_SANDBOX_PUBLIC_URL: http://127.0.0.1:4330
+      RELAY_SANDBOX_VIEW_SECRET: ${RELAY_SANDBOX_VIEW_SECRET:-relay-local-view-secret}
+    ports:
+      - "127.0.0.1:4330:4330"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}/data/workspaces:${PWD}/data/workspaces
+    networks: [relay-control, relay-runtime, relay-runtime-isolated]
+
+networks:
+  relay-control:
+    name: relay-control
+  relay-runtime:
+    name: relay-runtime
+  relay-runtime-isolated:
+    name: relay-runtime-isolated
+    internal: true
+
+volumes:
+  relay-postgres:
+  relay-artifacts:
+  relay-codex-home:
