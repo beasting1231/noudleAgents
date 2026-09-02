@@ -46,6 +46,9 @@ describe("computer session APIs", () => {
     const list = await context.app.inject({ method: "GET", url: "/v1/computers", headers: authHeaders });
     expect(list.json()).toHaveLength(1);
     expect((await context.app.inject({ method: "GET", url: `/v1/computers/${created.id}`, headers: authHeaders })).statusCode).toBe(200);
+    const view = await context.app.inject({ method: "GET", url: `/v1/computers/${created.id}/view`, headers: authHeaders });
+    expect(view.statusCode).toBe(302);
+    expect(view.headers.location).toBe(created.computerUrl);
 
     const removed = await context.app.inject({ method: "DELETE", url: `/v1/computers/${created.id}`, headers: authHeaders });
     expect(removed.statusCode).toBe(200);

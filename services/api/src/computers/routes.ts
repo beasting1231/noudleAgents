@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { RelayConfig } from "../config.js";
+import { conflict } from "../domain/errors.js";
 import type { ComputerService, ComputerActor } from "./computer-service.js";
 
 const IdParamsSchema = z.object({ id: z.string().min(1).max(160) });
@@ -42,6 +43,13 @@ function actor(request: FastifyRequest, config: RelayConfig): ComputerActor {
 
 export function registerComputerRoutes(app: FastifyInstance, computers: ComputerService, config: RelayConfig): void {
   app.get("/v1/computers", () => computers.list());
+  app.get("/v1/computers/:id/view", async (request, reply) => {
+    const session = await computers.get(IdParamsSchema.parse(request.params).id);
+    if (session.status !== "running" || !session.computerUrl) {
+      throw conflict("computer_view_unavailable", "Computer view is not available");
+    }
+    return reply.redirect(session.computerUrl);
+  });
   app.get("/v1/computers/:id", (request) => computers.get(IdParamsSchema.parse(request.params).id));
   app.post("/v1/computers", async (request, reply) => {
     const input = CreateComputerSchema.parse(request.body ?? {});

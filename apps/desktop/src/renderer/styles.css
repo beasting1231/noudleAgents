@@ -105,9 +105,10 @@ button:not(:disabled) { cursor: pointer; }
 .status-dot--blocked, .status-dot--failed { background: var(--danger); }
 .status-dot--completed { background: var(--success); }
 .rail-spacer { flex: 1; }
-.command-hint, .connector-button, .connection-row { display: flex; align-items: center; width: 100%; border: 0; background: transparent; color: var(--text-2); }
-.command-hint, .connector-button { gap: 8px; min-height: 34px; padding: 0 9px; border-radius: 7px; }
-.command-hint:hover, .connector-button:hover, .connection-row:hover { background: var(--surface-hover); color: var(--text); }
+.command-hint, .connector-button, .mobile-connect-button, .connection-row { display: flex; align-items: center; width: 100%; border: 0; background: transparent; color: var(--text-2); }
+.command-hint, .connector-button, .mobile-connect-button { gap: 8px; min-height: 34px; padding: 0 9px; border-radius: 7px; }
+.command-hint:hover, .connector-button:hover, .mobile-connect-button:hover, .connection-row:hover { background: var(--surface-hover); color: var(--text); }
+.mobile-connect-button { margin-bottom: 2px; }
 .connector-button { margin-bottom: 2px; }
 .command-hint kbd { margin-left: auto; color: var(--text-3); font-family: inherit; font-size: 10px; }
 .connection-row { gap: 8px; min-height: 38px; margin-top: 4px; padding: 0 9px; border-top: 1px solid var(--border); font-size: 11px; text-transform: capitalize; }
@@ -496,8 +497,7 @@ button:not(:disabled) { cursor: pointer; }
 .dialog--minimal .dialog-actions .accent-button { min-width: 116px; color: #111214; background: #ededeb; }
 .dialog--minimal .dialog-actions .accent-button:not(:disabled):hover { background: #fff; }
 .connector-list { display: flex; overflow-y: auto; max-height: calc(100vh - 150px); flex-direction: column; gap: 6px; padding: 14px 16px 18px; }
-.connector-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 4px 6px; }
-.connector-toolbar span { color: var(--text-3); font-size: 9.5px; }
+.connector-toolbar { display: flex; align-items: center; justify-content: flex-end; min-height: 34px; padding: 0 4px 6px; }
 .connector-toolbar button { display: flex; align-items: center; gap: 5px; height: 29px; padding: 0 9px; border: 0; border-radius: 8px; color: #101113; background: #ededeb; font-size: 10px; font-weight: 650; }
 .connector-toolbar button:hover { background: #fff; }
 .connector-card { overflow: hidden; border-radius: 12px; background: #17181b; transition: background 150ms ease, transform 150ms ease; }
@@ -530,7 +530,28 @@ button:not(:disabled) { cursor: pointer; }
 .connector-create-actions button:last-child { color: #101113; background: #d7ff64; }
 .connector-create-actions button:disabled { opacity: .45; }
 .connector-list > .form-error { padding: 4px 7px 0; }
+.connector-confirm-backdrop { z-index: 120; }
+.connector-confirm-dialog { width: min(360px, 100%); padding: 20px; border: 1px solid #303238; border-radius: 14px; background: #111215; box-shadow: 0 30px 100px rgba(0,0,0,.72); animation: dialog-in 180ms cubic-bezier(.2,.8,.2,1) both; }
+.connector-confirm-icon { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 15px; border-radius: 10px; color: var(--danger); background: rgba(255,125,132,.09); }
+.connector-confirm-dialog h2 { margin: 0; font-size: 16px; font-weight: 660; letter-spacing: -.02em; }
+.connector-confirm-dialog > p { margin: 7px 0 0; color: var(--text-3); font-size: 10.5px; line-height: 1.5; }
+.connector-confirm-dialog > .connector-confirm-error { color: var(--danger); }
+.connector-confirm-dialog footer { display: flex; justify-content: flex-end; gap: 7px; margin-top: 20px; }
+.connector-confirm-dialog footer button { height: 32px; min-width: 72px; padding: 0 11px; border: 0; border-radius: 8px; color: var(--text-2); background: #25262a; font-size: 10.5px; font-weight: 650; }
+.connector-confirm-dialog footer button:not(:disabled):hover { color: var(--text); background: #303136; }
+.connector-confirm-dialog footer .connector-confirm-destructive { min-width: 92px; color: var(--danger); background: rgba(255,125,132,.09); }
+.connector-confirm-dialog footer .connector-confirm-destructive:not(:disabled):hover { background: rgba(255,125,132,.15); }
+.connector-confirm-dialog footer button:disabled { opacity: .45; }
 @keyframes connector-auth-in { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: translateY(0); } }
+.mobile-pairing { display: flex; align-items: center; flex-direction: column; gap: 12px; padding: 20px 20px 24px; text-align: center; }
+.mobile-pairing-code { display: grid; place-items: center; width: 272px; height: 272px; padding: 10px; border-radius: 16px; background: #f4f4f2; box-shadow: 0 16px 44px rgba(0,0,0,.32); }
+.mobile-pairing-code img { display: block; width: 100%; height: 100%; }
+.mobile-pairing-code--loading { color: #202226; }
+.mobile-pairing-code--loading svg { animation: spin 900ms linear infinite; }
+.mobile-pairing-code--error { color: var(--danger); background: #17181b; border: 1px solid var(--border); box-shadow: none; }
+.mobile-pairing > strong { max-width: 360px; overflow: hidden; color: var(--text-2); font-size: 11px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+.mobile-pairing > p { display: flex; align-items: center; gap: 7px; max-width: 330px; margin: 0; color: var(--text-3); font-size: 10px; line-height: 1.5; }
+.mobile-pairing > .form-error { color: var(--danger); }
 .color-field, .agent-picker { margin: 0 0 16px; padding: 0; border: 0; }
 .color-field > div { display: flex; gap: 8px; margin-top: 9px; }
 .color-field button { display: grid; place-items: center; width: 25px; height: 25px; border: 2px solid transparent; border-radius: 7px; color: #111; }

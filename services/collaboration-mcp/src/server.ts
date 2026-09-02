@@ -94,9 +94,9 @@ server.registerTool(
   "connect_connector",
   {
     title: "Connect a service",
-    description: "Verify and securely save a GitHub, Resend, Notion, or Stripe credential only when the user explicitly asks to connect that service and supplies the credential. Pass the credential directly to this tool. Never repeat it, save it in files or profile data, or include it in chat output.",
+    description: "Verify and securely save a GitHub, Resend, Notion, Stripe, or Firebase credential only when the user explicitly asks to connect that service and supplies the credential. Firebase accepts a Firebase CLI refresh token. Pass the credential directly to this tool. Never repeat it, save it in files or profile data, or include it in chat output.",
     inputSchema: {
-      provider: z.enum(["github", "resend", "notion", "stripe"]),
+      provider: z.enum(["github", "resend", "notion", "stripe", "firebase"]),
       secret: z.string().min(10).max(10_000),
     },
   },
@@ -159,8 +159,8 @@ server.registerTool(
   "disconnect_connector",
   {
     title: "Disconnect a service",
-    description: "Remove a saved GitHub, Resend, Notion, or Stripe connection only when the user explicitly asks to disconnect it.",
-    inputSchema: { provider: z.enum(["github", "resend", "notion", "stripe"]) },
+    description: "Remove a saved GitHub, Resend, Notion, Stripe, or Firebase connection only when the user explicitly asks to disconnect it.",
+    inputSchema: { provider: z.enum(["github", "resend", "notion", "stripe", "firebase"]) },
   },
   async ({ provider }) => result(await client.request(`/v1/connectors/${encodeURIComponent(provider)}`, { method: "DELETE" })),
 );

@@ -11,7 +11,7 @@ RUN apt-get update \
   && useradd --create-home --uid 10001 --shell /bin/bash agent \
   && mkdir -p /workspace /home/agent/.relay-browser /home/agent/Downloads /home/agent/Desktop \
   && chown -R agent:agent /workspace /home/agent \
-  && npm install --global playwright@1.55.0
+  && npm install --global playwright@1.55.0 firebase-tools@15.28.2
 
 COPY --chown=agent:agent infra/agent-image/start-sandbox.sh /usr/local/bin/start-sandbox
 COPY --chown=agent:agent infra/agent-image/launch-chromium.sh /opt/relay/launch-chromium

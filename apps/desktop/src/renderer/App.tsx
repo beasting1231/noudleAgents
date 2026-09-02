@@ -1,3 +1,4 @@
+import { encodeMobilePairingPayload } from "@noudle-agents/protocol";
 import type {
   Agent,
   Approval,
@@ -31,6 +32,7 @@ import {
   CreditCard,
   FileCode2,
   FileText,
+  Flame,
   FolderOpen,
   Github,
   Download,
@@ -55,6 +57,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Smartphone,
   Square,
   Trash2,
   Upload,
@@ -63,6 +66,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import QRCode from "qrcode";
 import { type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { taskChildren, taskProgress, type DrawerTab } from "./state/relay-state";
@@ -72,7 +76,7 @@ import { useWorkspaceResources } from "./state/use-workspace-resources";
 import { useSchedules } from "./state/use-schedules";
 import { moveCommandSelection, resolveComposerEnter } from "./slash-commands";
 
-type DialogName = "agent" | "approvals" | "connection" | "connectors" | null;
+type DialogName = "agent" | "approvals" | "connection" | "connectors" | "mobile" | null;
 
 const CONTEXT_WIDTH_KEY = "relay.context.width";
 const MIN_CONTEXT_WIDTH = 280;
@@ -420,6 +424,9 @@ export function App() {
         </div>
 
         <div className="rail-spacer" />
+        <button className="mobile-connect-button" onClick={() => setDialog("mobile")}>
+          <Smartphone size={14} /><span>Connect to mobile app</span>
+        </button>
         <button className="connector-button" onClick={() => setDialog("connectors")}>
           <Plug size={14} /><span>Connectors</span>
         </button>
@@ -546,6 +553,7 @@ export function App() {
         />
       )}
       {dialog === "connectors" && <ConnectorsDialog client={client} agents={state.agents} onClose={() => setDialog(null)} />}
+      {dialog === "mobile" && <MobilePairingDialog clientUrl={client.baseUrl} clientToken={client.token} onClose={() => setDialog(null)} />}
       {paletteOpen && (
         <CommandPalette
           agents={state.agents}
@@ -1492,6 +1500,7 @@ const CONNECTOR_META: Record<ConnectorProvider, { name: string; credential: stri
   resend: { name: "Resend", credential: "API key", placeholder: "re_…", icon: Mail },
   notion: { name: "Notion", credential: "Integration token", placeholder: "ntn_…", icon: BookOpen },
   stripe: { name: "Stripe", credential: "Secret or restricted API key", placeholder: "sk_… or rk_…", icon: CreditCard },
+  firebase: { name: "Firebase", credential: "Firebase CLI refresh token", placeholder: "1//…", icon: Flame },
 };
 
 function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<typeof useRelay>["client"]; agents: Agent[]; onClose: () => void }) {
@@ -1501,6 +1510,7 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
   const [custom, setCustom] = useState<CreateCustomConnectorInput>({ name: "", baseUrl: "", authType: "bearer", headerName: null, authPrefix: "", secret: "" });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<ConnectorSummary | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -1530,14 +1540,21 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
   };
 
   const remove = async (connector: ConnectorSummary) => {
-    if (busy) return;
+    if (busy) return false;
     setBusy(connector.id); setError(null);
     try {
       await client.deleteConnector(connector.id);
       setConnectors(await client.listConnectors());
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not remove connector.");
+      return false;
     } finally { setBusy(null); }
+  };
+
+  const confirmRemoval = async () => {
+    if (!pendingRemoval) return;
+    if (await remove(pendingRemoval)) setPendingRemoval(null);
   };
 
   const createCustom = async (event: FormEvent) => {
@@ -1563,10 +1580,10 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
   const customConnectors = connectors.filter((connector) => connector.kind === "custom");
 
   return (
-    <DialogShell title="Connectors" onClose={onClose} minimal>
-      <div className="connector-list">
+    <>
+      <DialogShell title="Connectors" onClose={onClose} minimal>
+        <div className="connector-list">
         <div className="connector-toolbar">
-          <span>Available to every agent</span>
           <button onClick={() => { setEditing(editing === "custom" ? null : "custom"); setError(null); }}><Plus size={13} />New connector</button>
         </div>
         {editing === "custom" && (
@@ -1583,7 +1600,7 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
             <div className="connector-create-actions"><button type="button" onClick={() => setEditing(null)}>Cancel</button><button disabled={busy === "custom" || !custom.name.trim() || !custom.baseUrl.trim() || !custom.secret.trim()}>{busy === "custom" ? "Saving…" : "Save for team"}</button></div>
           </form>
         )}
-        {(["github", "resend", "notion", "stripe"] as ConnectorProvider[]).map((provider) => {
+        {(["github", "resend", "notion", "stripe", "firebase"] as ConnectorProvider[]).map((provider) => {
           const meta = CONNECTOR_META[provider];
           const connector = builtins.find((item) => item.provider === provider);
           const connected = Boolean(connector?.connected);
@@ -1594,7 +1611,7 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
                 <span className="connector-mark"><Icon size={18} /></span>
                 <div><strong>{meta.name}</strong><small>{connected && connector ? `${connector.accountLabel} · ${creator(connector)}` : "Built-in connector"}</small></div>
                 {connected ? (
-                  <button className="connector-action connector-action--muted" disabled={busy === connector?.id} onClick={() => connector && void remove(connector)}>{busy === connector?.id ? "…" : "Disconnect"}</button>
+                  <button className="connector-action connector-action--muted" disabled={busy === connector?.id} onClick={() => { if (connector) { setError(null); setPendingRemoval(connector); } }}>{busy === connector?.id ? "…" : "Disconnect"}</button>
                 ) : (
                   <button className="connector-action" onClick={() => { setEditing(provider); setSecret(""); setError(null); }}>Connect</button>
                 )}
@@ -1614,13 +1631,33 @@ function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<type
             <div className="connector-card-main">
               <span className="connector-mark connector-mark--custom"><Network size={18} /></span>
               <div><strong>{connector.name}</strong><small>{connector.accountLabel} · {creator(connector)}</small></div>
-              <button className="connector-action connector-action--muted" disabled={busy === connector.id} onClick={() => void remove(connector)}>{busy === connector.id ? "…" : "Remove"}</button>
+              <button className="connector-action connector-action--muted" disabled={busy === connector.id} onClick={() => { setError(null); setPendingRemoval(connector); }}>{busy === connector.id ? "…" : "Remove"}</button>
             </div>
           </div>
         ))}
         {error && <p className="form-error"><CircleAlert size={14} />{error}</p>}
-      </div>
-    </DialogShell>
+        </div>
+      </DialogShell>
+      {pendingRemoval && createPortal(
+        <div className="dialog-backdrop connector-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (!busy && event.target === event.currentTarget) setPendingRemoval(null); }}>
+          <section className="connector-confirm-dialog" role="dialog" aria-modal="true" aria-label={`${pendingRemoval.kind === "custom" ? "Remove" : "Disconnect"} ${pendingRemoval.name}`}>
+            <span className="connector-confirm-icon"><CircleAlert size={20} /></span>
+            <h2>{pendingRemoval.kind === "custom" ? `Remove ${pendingRemoval.name}?` : `Disconnect ${pendingRemoval.name}?`}</h2>
+            <p>{pendingRemoval.kind === "custom"
+              ? "Are you sure you want to remove this connector? It will no longer be available to the workspace."
+              : "Are you sure you want to disconnect this connector? It can be connected again later."}</p>
+            {error && <p className="connector-confirm-error" role="alert">{error}</p>}
+            <footer>
+              <button type="button" disabled={Boolean(busy)} onClick={() => setPendingRemoval(null)}>Cancel</button>
+              <button type="button" className="connector-confirm-destructive" disabled={Boolean(busy)} onClick={() => void confirmRemoval()}>
+                {busy ? (pendingRemoval.kind === "custom" ? "Removing…" : "Disconnecting…") : (pendingRemoval.kind === "custom" ? "Remove" : "Disconnect")}
+              </button>
+            </footer>
+          </section>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -1699,6 +1736,50 @@ function ConnectionDialog({ clientUrl, clientToken, mode, onClose, onRetry, onSa
         <p><HardDrive size={14} />Changing servers reloads noudleAgents. Agent history, files, computers, and approvals come from that server.</p>
         <div className="dialog-actions"><button type="button" className="text-button" onClick={onClose}>Close</button><button type="button" className="secondary-button" onClick={onRetry}><RefreshCw size={14} />Retry current</button><button className="accent-button" disabled={url.trim() === clientUrl && token === clientToken}>Save & reconnect</button></div>
       </form>
+    </DialogShell>
+  );
+}
+
+function MobilePairingDialog({ clientUrl, clientToken, onClose }: { clientUrl: string; clientToken: string; onClose: () => void }) {
+  const [qrCode, setQrCode] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const create = async () => {
+      try {
+        const parsed = new URL(clientUrl);
+        if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !clientToken.trim()) throw new Error("Connect the desktop to your VPS first.");
+        if (["localhost", "127.0.0.1", "::1", "[::1]"].includes(parsed.hostname)) throw new Error("Connect the desktop to a reachable VPS or LAN address first. localhost cannot be reached by your phone.");
+        const payload = encodeMobilePairingPayload({
+          type: "noudleAgents.mobile-pair",
+          version: 1,
+          baseUrl: parsed.toString().replace(/\/$/, ""),
+          token: clientToken.trim(),
+        });
+        const image = await QRCode.toDataURL(payload, {
+          errorCorrectionLevel: "M",
+          margin: 2,
+          width: 320,
+          color: { dark: "#090a0b", light: "#f4f4f2" },
+        });
+        if (active) setQrCode(image);
+      } catch (caught) {
+        if (active) setError(caught instanceof Error ? caught.message : "Could not create the connection code.");
+      }
+    };
+    void create();
+    return () => { active = false; };
+  }, [clientToken, clientUrl]);
+
+  return (
+    <DialogShell title="Connect to mobile app" subtitle="Scan this code with noudleAgents on your phone." onClose={onClose} minimal>
+      <div className="mobile-pairing">
+        {error ? <div className="mobile-pairing-code mobile-pairing-code--error"><WifiOff size={26} /></div> : qrCode ? <div className="mobile-pairing-code"><img alt="noudleAgents mobile connection QR code" src={qrCode} /></div> : <div className="mobile-pairing-code mobile-pairing-code--loading"><LoaderCircle size={22} /></div>}
+        <strong>{clientUrl}</strong>
+        <p><ShieldCheck size={14} />This code contains the owner token. Only scan it with a device you control.</p>
+        {error && <p className="form-error"><CircleAlert size={14} />{error}</p>}
+      </div>
     </DialogShell>
   );
 }

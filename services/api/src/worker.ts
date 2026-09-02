@@ -5,6 +5,7 @@ import type { RelayRepository } from "./database/repository.js";
 import { RelayService } from "./domain/relay-service.js";
 import type { QueueJob } from "./model.js";
 import type { AgentRuntime, RuntimeEvent } from "./runtime/runtime.js";
+import type { PushNotificationService } from "./push-notifications.js";
 
 export class RunWorker {
   private readonly workerId = `worker_${randomUUID()}`;
@@ -18,6 +19,7 @@ export class RunWorker {
     private readonly service: RelayService,
     private readonly runtime: AgentRuntime,
     private readonly config: RelayConfig,
+    private readonly pushNotifications?: PushNotificationService,
   ) {
     service.setInterruptHandler((runId) => this.interrupt(runId));
   }
@@ -248,6 +250,7 @@ export class RunWorker {
         actorId: activeAgent.id,
         payload: { run: completed, summary: result.summary },
       });
+      await this.pushNotifications?.notifyAgentResponse(response, activeAgent).catch(() => undefined);
       await this.setAgentIdle(activeAgent);
       await this.repository.completeJob(job.id);
     } catch (error) {

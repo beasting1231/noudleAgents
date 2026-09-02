@@ -16,13 +16,17 @@ import type { ConnectorRecord } from "../model.js";
 
 export type ConnectorFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
-const providers: ConnectorProvider[] = ["github", "resend", "notion", "stripe"];
+const providers: ConnectorProvider[] = ["github", "resend", "notion", "stripe", "firebase"];
+
+const firebaseOAuthClientId = "563584335869-fgrhgmd47bqnekij5i8b5pr03ho849e6.apps.googleusercontent.com";
+const firebaseOAuthClientSecret = "j9iVZfS8kkCEFUPaAeJV0sAi";
 
 const credentialNames: Record<ConnectorProvider, string> = {
   github: "GitHub token",
   resend: "Resend API key",
   notion: "Notion integration token",
   stripe: "Stripe API key",
+  firebase: "Firebase CLI refresh token",
 };
 
 const builtinMeta: Record<ConnectorProvider, {
@@ -36,6 +40,7 @@ const builtinMeta: Record<ConnectorProvider, {
   resend: { name: "Resend", baseUrl: "https://api.resend.com/", authType: "bearer", headerName: null, authPrefix: "Bearer " },
   notion: { name: "Notion", baseUrl: "https://api.notion.com/v1/", authType: "bearer", headerName: null, authPrefix: "Bearer " },
   stripe: { name: "Stripe", baseUrl: "https://api.stripe.com/v1/", authType: "basic", headerName: null, authPrefix: "" },
+  firebase: { name: "Firebase", baseUrl: "https://firebase.googleapis.com/", authType: "bearer", headerName: null, authPrefix: "Bearer " },
 };
 
 const blockedRequestHeaders = new Set(["authorization", "cookie", "host", "proxy-authorization", "x-api-key"]);
@@ -139,6 +144,23 @@ export class ConnectorService {
     if (actorType === "agent") await this.relay.getAgent(actorId);
   }
 
+  private async firebaseAccessToken(refreshToken: string): Promise<string> {
+    const response = await this.fetcher("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: firebaseOAuthClientId,
+        client_secret: firebaseOAuthClientSecret,
+        refresh_token: refreshToken,
+        grant_type: "refresh_token",
+      }).toString(),
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    const body = await response.json() as { access_token?: unknown };
+    if (typeof body.access_token !== "string" || !body.access_token) throw new Error("missing access token");
+    return body.access_token;
+  }
+
   private async verify(provider: ConnectorProvider, secret: string): Promise<string> {
     try {
       if (provider === "github") {
@@ -177,6 +199,18 @@ export class ConnectorService {
         const body = await response.json() as { name?: unknown; bot?: { workspace_name?: unknown } };
         if (typeof body.bot?.workspace_name === "string" && body.bot.workspace_name) return body.bot.workspace_name;
         return typeof body.name === "string" && body.name ? body.name : "Notion";
+      }
+      if (provider === "firebase") {
+        const accessToken = await this.firebaseAccessToken(secret);
+        const response = await this.fetcher("https://firebase.googleapis.com/v1beta1/projects?pageSize=1", {
+          headers: { authorization: `Bearer ${accessToken}` },
+        });
+        if (!response.ok) throw new Error(String(response.status));
+        const body = await response.json() as { results?: Array<{ projectId?: unknown; displayName?: unknown }> };
+        const project = body.results?.[0];
+        if (typeof project?.displayName === "string" && project.displayName) return project.displayName;
+        if (typeof project?.projectId === "string" && project.projectId) return project.projectId;
+        return "Firebase account";
       }
       const response = await this.fetcher("https://api.stripe.com/v1/balance", {
         headers: { authorization: `Basic ${Buffer.from(`${secret}:`).toString("base64")}` },
@@ -306,9 +340,10 @@ export class ConnectorService {
       if (!blockedRequestHeaders.has(name.toLowerCase())) headers[name] = value;
     }
     const secret = this.decrypt(record.encryptedSecret);
-    if (record.authType === "basic") headers.authorization = `Basic ${Buffer.from(record.provider === "stripe" ? `${secret}:` : secret).toString("base64")}`;
-    else if (record.authType === "bearer") headers.authorization = `${record.authPrefix || "Bearer "}${secret}`;
-    else headers[record.headerName || "X-API-Key"] = `${record.authPrefix}${secret}`;
+    const requestSecret = record.provider === "firebase" ? await this.firebaseAccessToken(secret) : secret;
+    if (record.authType === "basic") headers.authorization = `Basic ${Buffer.from(record.provider === "stripe" ? `${requestSecret}:` : requestSecret).toString("base64")}`;
+    else if (record.authType === "bearer") headers.authorization = `${record.authPrefix || "Bearer "}${requestSecret}`;
+    else headers[record.headerName || "X-API-Key"] = `${record.authPrefix}${requestSecret}`;
     const response = await this.fetcher(target.toString(), {
       method: input.method,
       headers,

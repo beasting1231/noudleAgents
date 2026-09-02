@@ -172,8 +172,17 @@ export const ArtifactSchema = z.object({
   createdAt: TimestampSchema,
 });
 
-export const ConnectorProviderSchema = z.enum(["github", "resend", "notion", "stripe"]);
+export const ConnectorProviderSchema = z.enum(["github", "resend", "notion", "stripe", "firebase"]);
 export const ConnectorAuthTypeSchema = z.enum(["bearer", "header", "basic"]);
+export const MobilePairingPayloadSchema = z.object({
+  type: z.literal("noudleAgents.mobile-pair"),
+  version: z.literal(1),
+  baseUrl: z.string().url().refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "Pairing URL must use HTTP or HTTPS"),
+  token: z.string().min(1).max(10_000),
+}).strict();
 export const ConnectorSummarySchema = z.object({
   id: IdSchema,
   provider: z.string().min(1).max(80),
@@ -369,10 +378,19 @@ export type Approval = z.infer<typeof ApprovalSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
 export type ConnectorAuthType = z.infer<typeof ConnectorAuthTypeSchema>;
+export type MobilePairingPayload = z.infer<typeof MobilePairingPayloadSchema>;
 export type ConnectorSummary = z.infer<typeof ConnectorSummarySchema>;
 export type CreateCustomConnectorInput = z.infer<typeof CreateCustomConnectorInputSchema>;
 export type ConnectorRequestInput = z.infer<typeof ConnectorRequestInputSchema>;
 export type ConnectorResponse = z.infer<typeof ConnectorResponseSchema>;
+
+export function encodeMobilePairingPayload(payload: MobilePairingPayload): string {
+  return JSON.stringify(MobilePairingPayloadSchema.parse(payload));
+}
+
+export function decodeMobilePairingPayload(value: string): MobilePairingPayload {
+  return MobilePairingPayloadSchema.parse(JSON.parse(value) as unknown);
+}
 export type Schedule = z.infer<typeof ScheduleSchema>;
 export type RelayEvent = z.infer<typeof RelayEventSchema>;
 export type CreateAgentInput = z.infer<typeof CreateAgentInputSchema>;

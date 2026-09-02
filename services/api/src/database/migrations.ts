@@ -61,4 +61,12 @@ CREATE TABLE IF NOT EXISTS schedules (id text PRIMARY KEY, workspace_id text NOT
 CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules(workspace_id, enabled, next_run_at) WHERE enabled=true;
 `,
   },
+  {
+    version: 6,
+    name: "push_subscriptions",
+    sql: `
+CREATE TABLE IF NOT EXISTS push_subscriptions (token text PRIMARY KEY, workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, platform text NOT NULL CHECK (platform IN ('ios','android')), device_id text, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS push_subscriptions_workspace_idx ON push_subscriptions(workspace_id, updated_at DESC);
+`,
+  },
 ] as const;

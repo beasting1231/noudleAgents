@@ -17,10 +17,12 @@
     "@noudle-agents/design-tokens": "workspace:*",
     "@noudle-agents/protocol": "workspace:*",
     "lucide-react": "^0.542.0",
+    "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.2",

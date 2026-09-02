@@ -30,6 +30,7 @@ import { MockAgentRuntime } from "./runtime/mock-runtime.js";
 import { CodexAgentRuntime } from "./runtime/codex-runtime.js";
 import type { AgentRuntime } from "./runtime/runtime.js";
 import { RunWorker } from "./worker.js";
+import { PushNotificationService, type PushFetch } from "./push-notifications.js";
 
 const IdParamsSchema = z.object({ id: z.string().min(1).max(160) });
 const ConversationParamsSchema = z.object({ conversationId: z.string().min(1).max(160) });
@@ -103,6 +104,12 @@ const UserProfilePatchSchema = z
     remove: z.array(z.string().min(1).max(120)).max(100).default([]),
   })
   .strict();
+const PushSubscriptionSchema = z.object({
+  token: z.string().regex(/^(?:Exponent|Expo)PushToken\[[A-Za-z0-9_-]+\]$/).max(200),
+  platform: z.enum(["ios", "android"]),
+  deviceId: z.string().min(1).max(200).nullable().optional(),
+}).strict();
+const DeletePushSubscriptionSchema = z.object({ token: z.string().min(1).max(200) }).strict();
 
 export interface CreateRelayAppOptions {
   config?: RelayConfig;
@@ -112,6 +119,7 @@ export interface CreateRelayAppOptions {
   logger?: boolean;
   sandboxManager?: SandboxManagerGateway;
   connectorFetcher?: ConnectorFetch;
+  pushFetch?: PushFetch;
 }
 
 export interface RelayAppContext {
@@ -179,7 +187,8 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
   const runtime = options.runtime ?? (config.runtimeMode === "codex"
     ? new CodexAgentRuntime(repository, config)
     : new MockAgentRuntime());
-  const worker = new RunWorker(repository, service, runtime, config);
+  const pushNotifications = new PushNotificationService(repository, options.pushFetch);
+  const worker = new RunWorker(repository, service, runtime, config, pushNotifications);
 
   await app.register(cors, {
     origin(origin, callback) {
@@ -235,6 +244,14 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
   app.get("/v1/snapshot", () => service.getSnapshot());
   app.get("/v1/profile", () => service.getUserProfile());
   app.patch("/v1/profile", (request) => service.updateUserProfile(UserProfilePatchSchema.parse(request.body)));
+  app.put("/v1/push-subscriptions", async (request, reply) => {
+    await pushNotifications.register(config.workspaceId, PushSubscriptionSchema.parse(request.body));
+    return reply.code(204).send();
+  });
+  app.delete("/v1/push-subscriptions", async (request, reply) => {
+    await pushNotifications.unregister(config.workspaceId, DeletePushSubscriptionSchema.parse(request.body).token);
+    return reply.code(204).send();
+  });
   registerConnectorRoutes(app, connectors, config.ownerId);
 
   app.get("/v1/agents", () => service.listAgents());

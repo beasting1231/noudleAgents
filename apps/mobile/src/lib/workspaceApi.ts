@@ -147,6 +147,10 @@ export class WorkspaceApi {
     return this.request("/v1/computers");
   }
 
+  computerViewUrl(id: string): string {
+    return `${this.baseUrl}/v1/computers/${encodeURIComponent(id)}/view`;
+  }
+
   createComputer(input: { agentId?: string; taskId?: string; browser?: boolean; networkAccess?: boolean }): Promise<ComputerSession> {
     return this.request("/v1/computers", {
       method: "POST",

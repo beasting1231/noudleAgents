@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CreateAgentInputSchema, SendMessageInputSchema, TaskBudgetSchema } from "./index.js";
+import { CreateAgentInputSchema, decodeMobilePairingPayload, encodeMobilePairingPayload, SendMessageInputSchema, TaskBudgetSchema } from "./index.js";
 
 describe("protocol", () => {
   it("normalizes an agent input", () => {
@@ -24,5 +24,15 @@ describe("protocol", () => {
     });
     expect(result.settings).toEqual({ model: "gpt-5.6-terra", reasoning: "high", speed: "extra-fast" });
     expect(result.settings).not.toHaveProperty("permissionMode");
+  });
+
+  it("round-trips a versioned mobile pairing code", () => {
+    const payload = { type: "noudleAgents.mobile-pair" as const, version: 1 as const, baseUrl: "https://agents.example.com", token: "owner-secret" };
+    expect(decodeMobilePairingPayload(encodeMobilePairingPayload(payload))).toEqual(payload);
+  });
+
+  it("rejects unrelated QR content and unsupported URLs", () => {
+    expect(() => decodeMobilePairingPayload("https://example.com")).toThrow();
+    expect(() => decodeMobilePairingPayload(JSON.stringify({ type: "noudleAgents.mobile-pair", version: 1, baseUrl: "file:///tmp/server", token: "secret" }))).toThrow();
   });
 });

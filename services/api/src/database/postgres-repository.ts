@@ -3,7 +3,7 @@ import pg, { type PoolClient } from "pg";
 import type { RelayEvent } from "@noudle-agents/protocol";
 import type { EntityKind, EntityMap, NewEvent, QueueJob, Snapshot, Workspace } from "../model.js";
 import { migrations } from "./migrations.js";
-import type { MessageRunCommit, MessageRunCommitResult, RelayRepository } from "./repository.js";
+import type { MessageRunCommit, MessageRunCommitResult, PushSubscription, RelayRepository } from "./repository.js";
 
 const { Pool } = pg;
 
@@ -317,5 +317,33 @@ export class PostgresRelayRepository implements RelayRepository {
 
   async releaseScheduleClaim(id: string): Promise<void> {
     await this.pool.query("UPDATE schedules SET locked_at=NULL,locked_by=NULL WHERE id=$1", [id]);
+  }
+
+  async listPushSubscriptions(workspaceId: string): Promise<PushSubscription[]> {
+    const result = await this.pool.query(
+      "SELECT token,workspace_id,platform,device_id,created_at,updated_at FROM push_subscriptions WHERE workspace_id=$1",
+      [workspaceId],
+    );
+    return result.rows.map((row: Record<string, unknown>) => ({
+      token: String(row.token),
+      workspaceId: String(row.workspace_id),
+      platform: row.platform as "ios" | "android",
+      deviceId: row.device_id === null ? null : String(row.device_id),
+      createdAt: new Date(String(row.created_at)).toISOString(),
+      updatedAt: new Date(String(row.updated_at)).toISOString(),
+    }));
+  }
+
+  async putPushSubscription(subscription: PushSubscription): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO push_subscriptions(token,workspace_id,platform,device_id,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6)
+       ON CONFLICT(token) DO UPDATE SET workspace_id=excluded.workspace_id,platform=excluded.platform,device_id=excluded.device_id,updated_at=excluded.updated_at`,
+      [subscription.token, subscription.workspaceId, subscription.platform, subscription.deviceId, subscription.createdAt, subscription.updatedAt],
+    );
+  }
+
+  async deletePushSubscription(workspaceId: string, token: string): Promise<boolean> {
+    const result = await this.pool.query("DELETE FROM push_subscriptions WHERE workspace_id=$1 AND token=$2", [workspaceId, token]);
+    return Boolean(result.rowCount);
   }
 }

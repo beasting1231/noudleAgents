@@ -32,6 +32,8 @@ Use a strong `RELAY_DEV_AUTH_TOKEN`; never use this LAN override on a public or 
 
 Enable the real Codex worker only after authenticating its persistent Codex home. Never commit or copy `auth.json` into an image.
 
+Firebase CLI is installed in both the Codex worker and shared computer image. Authenticate it only in the persistent runtime homes (or provision Application Default Credentials at deploy time); never bake Firebase credentials into either image.
+
 The sandbox manager mounts the Docker socket because it is a trusted control service. The computer container is non-root, read-only, capability-dropped, and resource-limited. All agents control that same trusted computer and therefore share its home and browser volumes. Browser actions are serialized to avoid simultaneous input, but agents can still affect one another's active page or shell state. The browser attaches only to the internal `relay-runtime-isolated` network, publishes no host ports, and is viewed through the manager's signed noVNC reverse proxy on port `4330`. Docker is suitable for this single-owner MVP, not a public untrusted multi-tenant boundary.
 
 The workspace computer is created when an agent first needs it, automatically stops after `RELAY_SANDBOX_IDLE_MINUTES` (30 by default), and wakes with the same computer ID, global home volume, Chromium profile, and shared files on the next browser action. Stopping does not delete those volumes.

@@ -30,6 +30,11 @@ describe("WorkspaceApi", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://relay.local/v1/computers/computer-1/exec", expect.objectContaining({ method: "POST" }));
   });
 
+  it("builds a stable authenticated computer view URL", () => {
+    expect(new WorkspaceApi("https://relay.example.com/", "secret").computerViewUrl("computer/a b"))
+      .toBe("https://relay.example.com/v1/computers/computer%2Fa%20b/view");
+  });
+
   it("rewrites only loopback stream hosts for phone access", () => {
     expect(resolveComputerUrl("http://127.0.0.1:49152/vnc.html?x=1", "http://192.168.1.20:4310")).toBe("http://192.168.1.20:49152/vnc.html?x=1");
     expect(resolveComputerUrl("https://stream.example.com/view", "http://192.168.1.20:4310")).toBe("https://stream.example.com/view");

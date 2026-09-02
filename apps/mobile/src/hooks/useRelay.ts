@@ -1,5 +1,5 @@
 import { RelayApiClient, type RelaySnapshot } from "@noudle-agents/api-client";
-import type { Message } from "@noudle-agents/protocol";
+import type { Conversation, Message } from "@noudle-agents/protocol";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Platform } from "react-native";
 
@@ -111,6 +111,20 @@ export function useRelay() {
     }
   }, []);
 
+  const clearConversation = useCallback(async (conversationId: string): Promise<Conversation> => {
+    if (!clientRef.current) throw new Error("Connect to clear this chat");
+    const replacement = await clientRef.current.clearConversation(conversationId);
+    const snapshot = await clientRef.current.getSnapshot();
+    dispatch({ type: "hydrate", snapshot, source: "server" });
+    dispatch({ type: "selectConversation", conversationId: replacement.id });
+    return replacement;
+  }, []);
+
+  const registerPushSubscription = useCallback(async (token: string) => {
+    if (!clientRef.current) throw new Error("Connect before enabling notifications");
+    await clientRef.current.registerPushSubscription({ token, platform: Platform.OS === "android" ? "android" : "ios" });
+  }, []);
+
   const resolveApproval = useCallback(async (approvalId: string, decision: "approve" | "deny") => {
     dispatch({ type: "resolveApproval", approvalId, decision: decision === "approve" ? "approved" : "denied" });
     try {
@@ -136,7 +150,9 @@ export function useRelay() {
     dispatch,
     connect: (nextConfig: InstanceConfig) => connect(nextConfig, true),
     sendMessage,
+    clearConversation,
+    registerPushSubscription,
     resolveApproval,
     delegateTask,
-  }), [config, configured, connect, delegateTask, resolveApproval, sendMessage, state]);
+  }), [clearConversation, config, configured, connect, delegateTask, registerPushSubscription, resolveApproval, sendMessage, state]);
 }

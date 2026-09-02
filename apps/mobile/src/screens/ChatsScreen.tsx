@@ -1,78 +1,120 @@
-import { Ionicons } from "@expo/vector-icons";
-import { radii, spacing } from "@noudle-agents/design-tokens";
-import type { Agent, Approval, Conversation, Message } from "@noudle-agents/protocol";
+import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
+import type { Agent, Conversation, Message } from "@noudle-agents/protocol";
 import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import {
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { KeyboardStickyView } from "react-native-keyboard-controller";
 
-import type { RelayState } from "../model";
+import { ComputerPanel } from "../components/ComputerOverlay";
 import { loadMessageDraft, saveMessageDraft } from "../lib/drafts";
-import { AgentAvatar, Button, SectionHeader, StateNotice, StatusLabel, theme, uiStyles } from "../ui";
+import { exactSlashCommand, matchingSlashCommands, type SlashCommand } from "../lib/slashCommands";
+import { setVisibleConversation } from "../lib/pushNotifications";
+import type { InstanceConfig, RelayState } from "../model";
+import { ConnectorsScreen } from "./ConnectorsScreen";
+
+const palette = {
+  black: "#000000",
+  header: "#111213",
+  rowPressed: "#17191b",
+  bubble: "#1b1d1f",
+  bubbleOwn: "#2a2d30",
+  composer: "#1b1d1f",
+  send: "#34383c",
+  separator: "#202224",
+  text: "#f4f4f5",
+  secondary: "#a3a5a8",
+  muted: "#717478",
+} as const;
 
 function timeLabel(value: string): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
 
-function ConversationStrip({ agents, conversations, activeId, onSelect }: { agents: Agent[]; conversations: Conversation[]; activeId: string | null; onSelect: (id: string) => void }) {
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.stripScroll} contentContainerStyle={styles.strip}>
-      {conversations.map((conversation) => {
-        const agent = agents.find((candidate) => candidate.id === conversation.memberAgentIds[0]);
-        const active = conversation.id === activeId;
-        return (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            key={conversation.id}
-            onPress={() => onSelect(conversation.id)}
-            style={({ pressed }) => [styles.conversationChip, active && styles.conversationChipActive, pressed && styles.pressed]}
-          >
-            {agent ? <AgentAvatar agent={agent} size={29} /> : <View style={styles.groupAvatar}><Ionicons name="people" size={14} color={theme.textSecondary} /></View>}
-            <View>
-              <Text numberOfLines={1} style={[styles.chipTitle, active && styles.chipTitleActive]}>{conversation.title}</Text>
-              <Text style={styles.chipKind}>{conversation.kind === "group" ? `${conversation.memberAgentIds.length} agents` : agent?.status.replaceAll("_", " ")}</Text>
-            </View>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
+function statusLabel(status: string): string {
+  if (status === "working" || status === "planning") return "working";
+  if (status === "waiting_user") return "waiting for you";
+  if (status === "waiting_agent") return "waiting";
+  return status.replaceAll("_", " ");
 }
 
-function ApprovalCard({ approval, agent, onResolve }: { approval: Approval; agent?: Agent; onResolve: (decision: "approve" | "deny") => void }) {
+function Initials({ agent, size = 54 }: { agent: Agent; size?: number }) {
   return (
-    <View style={styles.approvalCard}>
-      <View style={styles.approvalTop}>
-        <View style={styles.shield}><Ionicons name="shield-checkmark-outline" size={18} color={theme.warning} /></View>
-        <View style={styles.flex}>
-          <Text style={styles.approvalTitle}>{approval.title}</Text>
-          <Text style={styles.approvalMeta}>{agent?.name ?? "Agent"} · {approval.risk.replaceAll("_", " ")}</Text>
-        </View>
-      </View>
-      <Text style={styles.approvalDescription}>{approval.description}</Text>
-      <View style={styles.approvalActions}>
-        <Button label="Deny" variant="danger" onPress={() => onResolve("deny")} style={styles.flex} />
-        <Button label="Approve" variant="primary" onPress={() => onResolve("approve")} style={styles.flex} />
-      </View>
+    <View style={[styles.avatar, { width: size, height: size, borderRadius: size / 2, backgroundColor: agent.color }]}>
+      <Text style={[styles.avatarText, { fontSize: size * 0.3 }]}>{agent.avatar.slice(0, 2).toUpperCase()}</Text>
     </View>
   );
 }
 
-function MessageBubble({ message, agent }: { message: Message; agent?: Agent }) {
-  if (message.role === "system") {
-    return (
-      <View style={styles.systemMessage}>
-        <View style={styles.systemLine} />
-        <Text style={styles.systemText}>{message.content}</Text>
-        <View style={styles.systemLine} />
+function directConversation(agent: Agent, conversations: Conversation[]): Conversation | null {
+  return conversations.find((conversation) => conversation.kind === "direct" && conversation.memberAgentIds.includes(agent.id)) ?? null;
+}
+
+function AgentList({ state, onOpen, onOpenConnectors }: { state: RelayState; onOpen: (conversationId: string) => void; onOpenConnectors: () => void }) {
+  const rows = useMemo(() => state.agents.map((agent) => {
+    const conversation = directConversation(agent, state.conversations);
+    const messages = conversation
+      ? state.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      : [];
+    return { agent, conversation, lastMessage: messages[0] ?? null };
+  }).sort((a, b) => {
+    const aDate = a.lastMessage?.createdAt ?? a.conversation?.updatedAt ?? a.agent.updatedAt;
+    const bDate = b.lastMessage?.createdAt ?? b.conversation?.updatedAt ?? b.agent.updatedAt;
+    return bDate.localeCompare(aDate);
+  }), [state.agents, state.conversations, state.messages]);
+
+  return (
+    <View style={styles.screen}>
+      <View style={styles.listHeader}>
+        <Text style={styles.listTitle}>Chats</Text>
+        <Pressable accessibilityLabel="Open connectors" accessibilityRole="button" onPress={onOpenConnectors} style={({ pressed }) => [styles.headerIconButton, pressed && styles.pressed]}>
+          <MaterialCommunityIcons name="power-plug-outline" size={22} color={palette.text} />
+        </Pressable>
       </View>
-    );
+      <ScrollView contentContainerStyle={styles.listContent}>
+        {rows.map(({ agent, conversation, lastMessage }) => (
+          <Pressable
+            accessibilityLabel={`Chat with ${agent.name}`}
+            accessibilityRole="button"
+            disabled={!conversation}
+            key={agent.id}
+            onPress={() => conversation && onOpen(conversation.id)}
+            style={({ pressed }) => [styles.agentRow, pressed && styles.agentRowPressed]}
+          >
+            <Initials agent={agent} />
+            <View style={styles.agentCopy}>
+              <View style={styles.agentTopLine}>
+                <Text numberOfLines={1} style={styles.agentName}>{agent.name}</Text>
+                {lastMessage ? <Text style={styles.rowTime}>{timeLabel(lastMessage.createdAt)}</Text> : null}
+              </View>
+              <Text numberOfLines={1} style={styles.preview}>
+                {lastMessage?.content ?? statusLabel(agent.status)}
+              </Text>
+            </View>
+          </Pressable>
+        ))}
+        {state.connection === "loading" && rows.length === 0 ? <Text style={styles.empty}>Loading…</Text> : null}
+        {state.connection !== "loading" && rows.length === 0 ? <Text style={styles.empty}>No agents yet</Text> : null}
+      </ScrollView>
+    </View>
+  );
+}
+
+function MessageBubble({ message }: { message: Message }) {
+  if (message.role === "system") {
+    return <Text style={styles.systemMessage}>{message.content}</Text>;
   }
+
   const own = message.role === "user";
   return (
     <View style={[styles.messageRow, own && styles.messageRowOwn]}>
-      {!own && agent ? <AgentAvatar agent={agent} size={27} /> : null}
-      <View style={[styles.bubble, own ? styles.bubbleOwn : styles.bubbleAgent]}>
-        {!own && agent ? <Text style={[styles.author, { color: agent.color }]}>{agent.name}</Text> : null}
+      <View style={[styles.messageBubble, own && styles.messageBubbleOwn]}>
         <Text style={styles.messageText}>{message.content}</Text>
         <Text style={styles.messageTime}>{timeLabel(message.createdAt)}</Text>
       </View>
@@ -80,165 +122,344 @@ function MessageBubble({ message, agent }: { message: Message; agent?: Agent }) 
   );
 }
 
-export function ChatsScreen({
+function ChatThread({
   state,
-  onSelectConversation,
+  conversation,
+  agent,
+  config,
+  connected,
+  onBack,
+  onClear,
   onSend,
-  onResolveApproval,
 }: {
   state: RelayState;
-  onSelectConversation: (id: string) => void;
+  conversation: Conversation;
+  agent: Agent;
+  config: InstanceConfig;
+  connected: boolean;
+  onBack: () => void;
+  onClear: (conversationId: string) => Promise<Conversation>;
   onSend: (conversationId: string, agentId: string, content: string) => Promise<void>;
-  onResolveApproval: (approvalId: string, decision: "approve" | "deny") => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [computerOpen, setComputerOpen] = useState(false);
+  const [commandBusy, setCommandBusy] = useState(false);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  const conversation = state.conversations.find((item) => item.id === state.activeConversationId) ?? null;
-  const conversationMessages = useMemo(
-    () => state.messages.filter((message) => message.conversationId === conversation?.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-    [conversation?.id, state.messages],
+  const messages = useMemo(
+    () => state.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [conversation.id, state.messages],
   );
-  const primaryAgent = state.agents.find((agent) => agent.id === conversation?.memberAgentIds[0]);
-  const pendingApprovals = state.approvals.filter((approval) => approval.status === "pending" && (!conversation?.taskId || approval.taskId === conversation.taskId));
+  const commands = useMemo(() => matchingSlashCommands(draft), [draft]);
+  const exactCommand = exactSlashCommand(draft);
 
   useEffect(() => {
-    const conversationId = conversation?.id;
-    if (!conversationId) return;
     let disposed = false;
     setLoadedDraftId(null);
-    void loadMessageDraft(conversationId).then((value) => {
-      if (!disposed) { setDraft(value); setLoadedDraftId(conversationId); }
+    void loadMessageDraft(conversation.id).then((value) => {
+      if (!disposed) {
+        setDraft(value);
+        setLoadedDraftId(conversation.id);
+      }
     });
     return () => { disposed = true; };
-  }, [conversation?.id]);
+  }, [conversation.id]);
 
   useEffect(() => {
-    const conversationId = conversation?.id;
-    if (!conversationId || loadedDraftId !== conversationId) return;
-    const timer = setTimeout(() => void saveMessageDraft(conversationId, draft.slice(0, 20_000)), 250);
+    if (loadedDraftId !== conversation.id) return;
+    const timer = setTimeout(() => void saveMessageDraft(conversation.id, draft.slice(0, 20_000)), 250);
     return () => clearTimeout(timer);
-  }, [conversation?.id, draft, loadedDraftId]);
+  }, [conversation.id, draft, loadedDraftId]);
+
+  const runCommand = async (command: SlashCommand) => {
+    if (commandBusy) return;
+    setDraft("");
+    void saveMessageDraft(conversation.id, "");
+    setCommandBusy(true);
+    try {
+      if (command === "/clear") await onClear(conversation.id);
+    } finally {
+      setCommandBusy(false);
+    }
+  };
 
   const submit = () => {
     const content = draft.trim();
-    if (!content || !conversation || !primaryAgent) return;
+    if (!content || commandBusy) return;
+    const command = exactSlashCommand(content);
+    if (command) {
+      void runCommand(command);
+      return;
+    }
+    if (commands.length > 0) return;
     setDraft("");
     void saveMessageDraft(conversation.id, "");
-    void onSend(conversation.id, primaryAgent.id, content);
+    void onSend(conversation.id, agent.id, content);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
   };
 
-  if (state.conversations.length === 0) {
-    return <StateNotice icon="chatbubbles-outline" title="No conversations" detail="Create an agent on desktop, then return here to continue the same conversation." />;
-  }
-
   return (
-    <KeyboardAvoidingView style={uiStyles.screen} behavior={Platform.OS === "ios" ? "padding" : undefined} keyboardVerticalOffset={4}>
-      <ConversationStrip agents={state.agents} conversations={state.conversations} activeId={conversation?.id ?? null} onSelect={onSelectConversation} />
-      {conversation ? (
-        <>
-          <View style={styles.threadHeader}>
-            <View style={styles.threadIdentity}>
-              {primaryAgent ? <AgentAvatar agent={primaryAgent} size={38} /> : <View style={styles.groupAvatarLarge}><Ionicons name="people" size={17} color={theme.textSecondary} /></View>}
-              <View style={styles.flex}>
-                <Text style={styles.threadTitle}>{conversation.title}</Text>
-                {primaryAgent ? <StatusLabel status={primaryAgent.status} /> : <Text style={styles.groupLabel}>Shared room · {conversation.memberAgentIds.length} agents</Text>}
-              </View>
+    <View style={styles.screen}>
+      <View style={styles.threadHeader}>
+        <Pressable accessibilityLabel="Back to chats" accessibilityRole="button" onPress={onBack} style={styles.backButton}>
+          <Ionicons name="chevron-back" size={28} color={palette.text} />
+        </Pressable>
+        <Initials agent={agent} size={38} />
+        <View style={styles.threadCopy}>
+          <Text numberOfLines={1} style={styles.threadName}>{agent.name}</Text>
+          <Text numberOfLines={1} style={styles.threadStatus}>{statusLabel(agent.status)}</Text>
+        </View>
+        <Pressable
+          accessibilityLabel={computerOpen ? "Close agent computer" : "Open agent computer"}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: computerOpen }}
+          onPress={() => setComputerOpen((value) => !value)}
+          style={({ pressed }) => [styles.computerButton, computerOpen && styles.computerButtonActive, pressed && styles.pressed]}
+        >
+          <Ionicons name="desktop-outline" size={21} color={palette.text} />
+        </Pressable>
+      </View>
+
+      {computerOpen ? <ComputerPanel agent={agent} config={config} connected={connected} /> : null}
+
+      <ScrollView
+        ref={scrollRef}
+        style={styles.messages}
+        contentContainerStyle={styles.messageContent}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
+      >
+        {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+        {messages.length === 0 ? <Text style={styles.empty}>No messages yet</Text> : null}
+      </ScrollView>
+
+      <KeyboardStickyView>
+        <View style={styles.composerBar}>
+          {commands.length > 0 ? (
+            <View accessibilityLabel="Commands" style={styles.slashMenu}>
+              {commands.map((command) => (
+                <Pressable
+                  accessibilityLabel={`${command.value} ${command.label}`}
+                  accessibilityRole="button"
+                  disabled={commandBusy}
+                  key={command.value}
+                  onPress={() => void runCommand(command.value)}
+                  style={({ pressed }) => [styles.slashCommand, pressed && styles.agentRowPressed]}
+                >
+                  <Ionicons name={command.icon} size={19} color={palette.secondary} />
+                  <Text style={styles.slashValue}>{command.value}</Text>
+                  <Text style={styles.slashLabel}>{command.label}</Text>
+                </Pressable>
+              ))}
             </View>
-            <Pressable accessibilityRole="button" style={styles.detailsButton}>
-              <Ionicons name="ellipsis-horizontal" size={20} color={theme.textSecondary} />
+          ) : null}
+          <View style={styles.composer}>
+            <TextInput
+              accessibilityLabel={`Message ${agent.name}`}
+              multiline
+              onChangeText={setDraft}
+              onSubmitEditing={submit}
+              placeholder="Message"
+              placeholderTextColor={palette.muted}
+              returnKeyType="send"
+              submitBehavior="submit"
+              style={styles.input}
+              value={draft}
+            />
+            <Pressable
+              accessibilityLabel="Send message"
+              accessibilityRole="button"
+              disabled={!draft.trim() || commandBusy || (commands.length > 0 && !exactCommand)}
+              onPress={submit}
+              style={({ pressed }) => [styles.sendButton, (!draft.trim() || commandBusy || (commands.length > 0 && !exactCommand)) && styles.sendDisabled, pressed && styles.pressed]}
+            >
+              <Ionicons name="arrow-up" size={20} color={palette.text} />
             </Pressable>
           </View>
-          <ScrollView
-            ref={scrollRef}
-            style={styles.messageList}
-            contentContainerStyle={styles.messageContent}
-            keyboardShouldPersistTaps="handled"
-            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
-          >
-            {pendingApprovals.length > 0 ? (
-              <View>
-                <SectionHeader title="Needs your approval" detail={`${pendingApprovals.length}`} />
-                {pendingApprovals.map((approval) => (
-                  <ApprovalCard key={approval.id} approval={approval} agent={state.agents.find((agent) => agent.id === approval.agentId)} onResolve={(decision) => onResolveApproval(approval.id, decision)} />
-                ))}
-              </View>
-            ) : null}
-            {conversationMessages.length > 0 ? conversationMessages.map((message) => (
-              <MessageBubble key={message.id} message={message} agent={state.agents.find((agent) => agent.id === message.authorId)} />
-            )) : <StateNotice icon="sparkles-outline" title="Start the conversation" detail="Messages sent here continue this agent’s persistent Codex thread on every device." />}
-          </ScrollView>
-          <View style={styles.composerWrap}>
-            <View style={styles.composer}>
-              <Pressable accessibilityLabel="Attach file" accessibilityRole="button" style={styles.attachButton}>
-                <Ionicons name="add" size={22} color={theme.textSecondary} />
-              </Pressable>
-              <TextInput
-                accessibilityLabel={`Message ${conversation.title}`}
-                multiline
-                onChangeText={setDraft}
-                onSubmitEditing={submit}
-                placeholder={`Message ${conversation.title}`}
-                placeholderTextColor={theme.textMuted}
-                returnKeyType="send"
-                style={styles.input}
-                value={draft}
-              />
-              <Pressable accessibilityLabel="Send message" accessibilityRole="button" disabled={!draft.trim()} onPress={submit} style={({ pressed }) => [styles.sendButton, !draft.trim() && styles.sendDisabled, pressed && styles.pressed]}>
-                <Ionicons name="arrow-up" size={19} color={theme.canvas} />
-              </Pressable>
-            </View>
-            <Text style={styles.composerHint}>Agents may delegate this work. You’ll see every handoff.</Text>
-          </View>
-        </>
-      ) : null}
-    </KeyboardAvoidingView>
+        </View>
+      </KeyboardStickyView>
+    </View>
   );
 }
 
+export function ChatsScreen({
+  config,
+  connected,
+  state,
+  onSelectConversation,
+  onSend,
+  onClear,
+  requestedConversationId,
+  onRequestedConversationHandled,
+}: {
+  config: InstanceConfig;
+  connected: boolean;
+  state: RelayState;
+  onSelectConversation: (id: string | null) => void;
+  onSend: (conversationId: string, agentId: string, content: string) => Promise<void>;
+  onClear: (conversationId: string) => Promise<Conversation>;
+  requestedConversationId: string | null;
+  onRequestedConversationHandled: () => void;
+}) {
+  const [openConversationId, setOpenConversationId] = useState<string | null>(null);
+  const [connectorsOpen, setConnectorsOpen] = useState(false);
+  const conversation = state.conversations.find((item) => item.id === openConversationId) ?? null;
+  const agent = state.agents.find((item) => conversation?.memberAgentIds[0] === item.id) ?? null;
+
+  useEffect(() => {
+    if (openConversationId && !conversation) setOpenConversationId(null);
+  }, [conversation, openConversationId]);
+
+  useEffect(() => {
+    if (requestedConversationId && state.conversations.some((item) => item.id === requestedConversationId)) {
+      setConnectorsOpen(false);
+      setOpenConversationId(requestedConversationId);
+      onSelectConversation(requestedConversationId);
+      onRequestedConversationHandled();
+    }
+  }, [onRequestedConversationHandled, onSelectConversation, requestedConversationId, state.conversations]);
+
+  useEffect(() => {
+    setVisibleConversation(conversation?.id ?? null);
+    return () => setVisibleConversation(null);
+  }, [conversation?.id]);
+
+  const open = (conversationId: string) => {
+    setOpenConversationId(conversationId);
+    onSelectConversation(conversationId);
+  };
+
+  const back = () => {
+    setOpenConversationId(null);
+    onSelectConversation(null);
+  };
+
+  const clear = async (conversationId: string) => {
+    const replacement = await onClear(conversationId);
+    setOpenConversationId(replacement.id);
+    onSelectConversation(replacement.id);
+    return replacement;
+  };
+
+  if (connectorsOpen) {
+    return <ConnectorsScreen agents={state.agents} config={config} connected={connected} onBack={() => setConnectorsOpen(false)} />;
+  }
+
+  if (conversation && agent) {
+    return <ChatThread state={state} conversation={conversation} agent={agent} config={config} connected={connected} onBack={back} onClear={clear} onSend={onSend} />;
+  }
+
+  return <AgentList state={state} onOpen={open} onOpenConnectors={() => setConnectorsOpen(true)} />;
+}
+
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  stripScroll: { flexGrow: 0, minHeight: 74, maxHeight: 74 },
-  strip: { gap: spacing.x2, paddingHorizontal: spacing.x4, paddingTop: spacing.x2, paddingBottom: spacing.x3 },
-  conversationChip: { minWidth: 132, maxWidth: 170, minHeight: 54, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 10, borderRadius: radii.card, borderWidth: StyleSheet.hairlineWidth, borderColor: theme.borderSubtle, backgroundColor: theme.surface1 },
-  conversationChipActive: { borderColor: theme.borderStrong, backgroundColor: theme.surface2 },
-  pressed: { opacity: 0.72 },
-  groupAvatar: { width: 29, height: 29, borderRadius: 15, alignItems: "center", justifyContent: "center", backgroundColor: theme.surfaceHover },
-  chipTitle: { maxWidth: 92, color: theme.textSecondary, fontSize: 13, fontWeight: "700" },
-  chipTitleActive: { color: theme.textPrimary },
-  chipKind: { maxWidth: 92, marginTop: 2, color: theme.textMuted, fontSize: 10, textTransform: "capitalize" },
-  threadHeader: { minHeight: 62, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.x4, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: theme.borderSubtle },
-  threadIdentity: { flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.x3 },
-  threadTitle: { color: theme.textPrimary, fontSize: 15, fontWeight: "700", marginBottom: 3 },
-  groupAvatarLarge: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: theme.surface2 },
-  groupLabel: { color: theme.textMuted, fontSize: 11 },
-  detailsButton: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  messageList: { flex: 1 },
-  messageContent: { paddingHorizontal: spacing.x4, paddingTop: spacing.x2, paddingBottom: spacing.x6 },
-  messageRow: { flexDirection: "row", alignItems: "flex-end", gap: spacing.x2, marginTop: spacing.x4, maxWidth: "88%" },
-  messageRowOwn: { alignSelf: "flex-end", justifyContent: "flex-end" },
-  bubble: { flexShrink: 1, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 15 },
-  bubbleAgent: { flexShrink: 1, backgroundColor: theme.surface2, borderBottomLeftRadius: 4 },
-  bubbleOwn: { backgroundColor: theme.accentQuiet, borderColor: "rgba(215,255,100,0.14)", borderWidth: StyleSheet.hairlineWidth, borderBottomRightRadius: 4 },
-  author: { fontSize: 11, fontWeight: "800", marginBottom: 5 },
-  messageText: { color: theme.textPrimary, fontSize: 14, lineHeight: 20 },
-  messageTime: { alignSelf: "flex-end", color: theme.textMuted, fontSize: 9, marginTop: 5 },
-  systemMessage: { flexDirection: "row", alignItems: "center", gap: spacing.x2, marginVertical: spacing.x4 },
-  systemLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: theme.borderSubtle },
-  systemText: { maxWidth: "72%", color: theme.textMuted, fontSize: 10, textAlign: "center" },
-  approvalCard: { padding: spacing.x4, marginBottom: spacing.x3, borderRadius: radii.card, backgroundColor: "rgba(243,198,109,0.055)", borderWidth: StyleSheet.hairlineWidth, borderColor: "rgba(243,198,109,0.24)" },
-  approvalTop: { flexDirection: "row", alignItems: "center", gap: spacing.x3 },
-  shield: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(243,198,109,0.10)" },
-  approvalTitle: { color: theme.textPrimary, fontSize: 14, fontWeight: "700" },
-  approvalMeta: { marginTop: 3, color: theme.warning, fontSize: 10, textTransform: "capitalize" },
-  approvalDescription: { color: theme.textSecondary, fontSize: 12, lineHeight: 18, marginTop: spacing.x3 },
-  approvalActions: { flexDirection: "row", gap: spacing.x2, marginTop: spacing.x4 },
-  composerWrap: { paddingHorizontal: spacing.x3, paddingTop: spacing.x2, paddingBottom: spacing.x2, backgroundColor: theme.canvas, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.borderSubtle },
-  composer: { minHeight: 50, maxHeight: 126, flexDirection: "row", alignItems: "flex-end", gap: spacing.x2, padding: 5, borderRadius: 14, backgroundColor: theme.surface1, borderWidth: StyleSheet.hairlineWidth, borderColor: theme.borderStrong },
-  attachButton: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-  input: { flex: 1, minHeight: 40, maxHeight: 112, paddingTop: 10, paddingBottom: 9, color: theme.textPrimary, fontSize: 14 },
-  sendButton: { width: 40, height: 40, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: theme.accent },
-  sendDisabled: { opacity: 0.24 },
-  composerHint: { color: theme.textMuted, fontSize: 9, textAlign: "center", marginTop: 5 },
+  screen: { flex: 1, backgroundColor: palette.black },
+  listHeader: {
+    height: Platform.OS === "ios" ? 102 : 72,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+    backgroundColor: palette.header,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.separator,
+  },
+  listTitle: { color: palette.text, fontSize: 30, fontWeight: "700", letterSpacing: -0.8 },
+  headerIconButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 21 },
+  listContent: { paddingBottom: 24 },
+  agentRow: {
+    minHeight: 78,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingLeft: 16,
+    paddingRight: 18,
+  },
+  agentRowPressed: { backgroundColor: palette.rowPressed },
+  avatar: { alignItems: "center", justifyContent: "center" },
+  avatarText: { color: "#0b0c0e", fontWeight: "700", letterSpacing: -0.3 },
+  agentCopy: {
+    flex: 1,
+    alignSelf: "stretch",
+    justifyContent: "center",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.separator,
+  },
+  agentTopLine: { flexDirection: "row", alignItems: "center", gap: 12 },
+  agentName: { flex: 1, color: palette.text, fontSize: 16, fontWeight: "600" },
+  rowTime: { color: palette.muted, fontSize: 12 },
+  preview: { marginTop: 5, color: palette.secondary, fontSize: 14 },
+  empty: { color: palette.muted, fontSize: 14, textAlign: "center", marginTop: 42 },
+  threadHeader: {
+    height: Platform.OS === "ios" ? 96 : 66,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 10,
+    paddingLeft: 4,
+    paddingRight: 16,
+    paddingBottom: 9,
+    backgroundColor: palette.header,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: palette.separator,
+  },
+  backButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center" },
+  threadCopy: { flex: 1, height: 40, justifyContent: "center" },
+  threadName: { color: palette.text, fontSize: 16, fontWeight: "600" },
+  threadStatus: { marginTop: 2, color: palette.muted, fontSize: 12 },
+  computerButton: { width: 42, height: 42, alignItems: "center", justifyContent: "center", borderRadius: 21 },
+  computerButtonActive: { backgroundColor: palette.bubbleOwn },
+  messages: { flex: 1, backgroundColor: palette.black },
+  messageContent: { paddingHorizontal: 10, paddingTop: 12, paddingBottom: 12 },
+  messageRow: { flexDirection: "row", marginBottom: 5, paddingRight: 54 },
+  messageRowOwn: { justifyContent: "flex-end", paddingRight: 0, paddingLeft: 54 },
+  messageBubble: {
+    maxWidth: "100%",
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 6,
+    borderRadius: 16,
+    borderBottomLeftRadius: 5,
+    backgroundColor: palette.bubble,
+  },
+  messageBubbleOwn: { borderBottomLeftRadius: 16, borderBottomRightRadius: 5, backgroundColor: palette.bubbleOwn },
+  messageText: { color: palette.text, fontSize: 16, lineHeight: 21 },
+  messageTime: { alignSelf: "flex-end", marginTop: 3, color: palette.muted, fontSize: 10 },
+  systemMessage: { alignSelf: "center", maxWidth: "82%", marginVertical: 10, color: palette.muted, fontSize: 11, lineHeight: 15, textAlign: "center" },
+  composerBar: {
+    paddingHorizontal: 8,
+    paddingTop: 7,
+    paddingBottom: Platform.OS === "ios" ? 24 : 8,
+    backgroundColor: palette.black,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: palette.separator,
+  },
+  slashMenu: {
+    overflow: "hidden",
+    marginBottom: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: palette.separator,
+    borderRadius: 12,
+    backgroundColor: palette.composer,
+  },
+  slashCommand: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
+  slashValue: { color: palette.text, fontSize: 14, fontWeight: "700" },
+  slashLabel: { color: palette.muted, fontSize: 13 },
+  composer: {
+    minHeight: 48,
+    maxHeight: 124,
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 6,
+    paddingLeft: 14,
+    paddingRight: 5,
+    paddingVertical: 5,
+    borderRadius: 24,
+    backgroundColor: palette.composer,
+  },
+  input: { flex: 1, minHeight: 38, maxHeight: 110, paddingTop: 9, paddingBottom: 8, color: palette.text, fontSize: 16 },
+  sendButton: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: palette.send },
+  sendDisabled: { opacity: 0.28 },
+  pressed: { opacity: 0.62 },
 });

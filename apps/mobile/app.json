@@ -2,22 +2,40 @@
   "expo": {
     "name": "noudleAgents",
     "slug": "noudle-agents-mobile",
+    "owner": "noudles-team",
+    "scheme": "noudleagents",
     "version": "0.1.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "app.noudleagents.mobile",
+      "bundleIdentifier": "com.bastingsolutions.noudleagents",
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "noudleAgents connects to your local agent workspace during development."
-      }
+        "NSLocalNetworkUsageDescription": "noudleAgents connects to your local agent workspace during development.",
+        "NSUserNotificationsUsageDescription": "noudleAgents notifies you when an agent finishes responding."
+      },
+      "appleTeamId": "UUUB84QWDW"
     },
     "web": {
       "bundler": "metro",
       "output": "single",
       "name": "noudleAgents"
     },
-    "plugins": ["expo-secure-store"]
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow noudleAgents to scan a desktop connection code."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "e00f9439-b95e-43ee-8b62-dfad37a8b0fc"
+      }
+    }
   }
 }

@@ -81,6 +81,14 @@ export class RelayApiClient {
     return this.request(`/v1/conversations/${encodeURIComponent(id)}/clear`, { method: "POST" });
   }
 
+  registerPushSubscription(input: { token: string; platform: "ios" | "android"; deviceId?: string | null }): Promise<void> {
+    return this.request("/v1/push-subscriptions", { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  unregisterPushSubscription(token: string): Promise<void> {
+    return this.request("/v1/push-subscriptions", { method: "DELETE", body: JSON.stringify({ token }) });
+  }
+
   listConnectors(): Promise<ConnectorSummary[]> {
     return this.request("/v1/connectors");
   }

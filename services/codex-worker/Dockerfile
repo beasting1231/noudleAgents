@@ -15,7 +15,7 @@ ARG CODEX_VERSION=0.144.1
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git curl ripgrep \
   && rm -rf /var/lib/apt/lists/* \
-  && npm install --global "@openai/codex@${CODEX_VERSION}" \
+  && npm install --global "@openai/codex@${CODEX_VERSION}" firebase-tools@15.28.2 \
   && useradd --create-home --uid 10001 relay \
   && mkdir -p /workspace /home/relay/.codex \
   && chown -R relay:relay /workspace /home/relay
@@ -33,5 +33,6 @@ USER relay
 ENV NODE_ENV=production
 ENV RELAY_WORKSPACE_PATH=/workspace
 ENV RELAY_CODEX_HOME=/home/relay/.codex
+ENV XDG_CONFIG_HOME=/home/relay/.codex/config
 EXPOSE 4320
 CMD ["node", "services/codex-worker/dist/server.js"]

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RelayEvent } from "@noudle-agents/protocol";
 import type { EntityKind, EntityMap, NewEvent, QueueJob, Snapshot, Workspace } from "../model.js";
-import type { MessageRunCommit, MessageRunCommitResult, RelayRepository } from "./repository.js";
+import type { MessageRunCommit, MessageRunCommitResult, PushSubscription, RelayRepository } from "./repository.js";
 
 export interface MemoryRepositoryState {
   workspace: Map<string, Workspace>;
@@ -10,6 +10,7 @@ export interface MemoryRepositoryState {
   jobs: Map<string, QueueJob>;
   idempotency: Map<string, { message: EntityMap["messages"]; runId: string }>;
   scheduleLocks: Map<string, { lockedAt: string; lockedBy: string }>;
+  pushSubscriptions: Map<string, PushSubscription>;
   cursor: number;
 }
 
@@ -32,6 +33,7 @@ export function createMemoryState(): MemoryRepositoryState {
     jobs: new Map(),
     idempotency: new Map(),
     scheduleLocks: new Map(),
+    pushSubscriptions: new Map(),
     cursor: 0,
   };
 }
@@ -208,5 +210,21 @@ export class MemoryRelayRepository implements RelayRepository {
 
   async releaseScheduleClaim(id: string): Promise<void> {
     this.state.scheduleLocks.delete(id);
+  }
+
+  async listPushSubscriptions(workspaceId: string): Promise<PushSubscription[]> {
+    return [...this.state.pushSubscriptions.values()]
+      .filter((subscription) => subscription.workspaceId === workspaceId)
+      .map((subscription) => structuredClone(subscription));
+  }
+
+  async putPushSubscription(subscription: PushSubscription): Promise<void> {
+    this.state.pushSubscriptions.set(subscription.token, structuredClone(subscription));
+  }
+
+  async deletePushSubscription(workspaceId: string, token: string): Promise<boolean> {
+    const subscription = this.state.pushSubscriptions.get(token);
+    if (!subscription || subscription.workspaceId !== workspaceId) return false;
+    return this.state.pushSubscriptions.delete(token);
   }
 }

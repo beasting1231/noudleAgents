@@ -43,6 +43,30 @@ describe("noudleAgents HTTP API", () => {
     expect(missingIdentity.statusCode).toBe(401);
   });
 
+  it("registers and removes mobile push subscriptions", async () => {
+    const { app, repository } = await setup();
+    const token = "ExponentPushToken[test-device-token]";
+    const registered = await app.inject({
+      method: "PUT",
+      url: "/v1/push-subscriptions",
+      headers: authHeaders,
+      payload: { token, platform: "ios" },
+    });
+    expect(registered.statusCode).toBe(204);
+    expect(await repository.listPushSubscriptions("workspace-test")).toEqual([
+      expect.objectContaining({ token, platform: "ios", workspaceId: "workspace-test" }),
+    ]);
+
+    const removed = await app.inject({
+      method: "DELETE",
+      url: "/v1/push-subscriptions",
+      headers: authHeaders,
+      payload: { token },
+    });
+    expect(removed.statusCode).toBe(204);
+    expect(await repository.listPushSubscriptions("workspace-test")).toEqual([]);
+  });
+
   it("prevents agents from creating, editing, or deleting agent configuration", async () => {
     const { app } = await setup();
     const before = await app.inject({ method: "GET", url: "/v1/agents/agent-builder", headers: authHeaders });
@@ -125,6 +149,7 @@ describe("noudleAgents HTTP API", () => {
       expect.objectContaining({ provider: "resend", connected: false }),
       expect.objectContaining({ provider: "notion", connected: false }),
       expect.objectContaining({ provider: "stripe", connected: false }),
+      expect.objectContaining({ provider: "firebase", connected: false }),
     ]));
     expect((await context.app.inject({ method: "DELETE", url: "/v1/connectors/github", headers: authHeaders })).statusCode).toBe(204);
   });
@@ -172,6 +197,53 @@ describe("noudleAgents HTTP API", () => {
     const records = await context.repository.list("connectors", "workspace-test");
     expect(records).toHaveLength(2);
     expect(records.every((record) => !record.encryptedSecret.includes("test"))).toBe(true);
+  });
+
+  it("verifies Firebase refresh tokens and uses short-lived access tokens for requests", async () => {
+    const refreshToken = "firebase-refresh-token";
+    let tokenExchanges = 0;
+    context = await createRelayApp({
+      config: testConfig(),
+      repository: new MemoryRelayRepository(),
+      runtime: new MockAgentRuntime(0),
+      startWorker: false,
+      connectorFetcher: async (url, init) => {
+        if (url === "https://oauth2.googleapis.com/token") {
+          tokenExchanges += 1;
+          expect(init?.method).toBe("POST");
+          expect(init?.headers).toEqual({ "content-type": "application/x-www-form-urlencoded" });
+          expect(String(init?.body)).toContain(`refresh_token=${refreshToken}`);
+          return new Response(JSON.stringify({ access_token: `short-lived-${tokenExchanges}` }), { status: 200 });
+        }
+        const headers = init?.headers as Record<string, string> | undefined;
+        expect(headers?.authorization).toBe(`Bearer short-lived-${tokenExchanges}`);
+        if (url === "https://firebase.googleapis.com/v1beta1/projects?pageSize=1") {
+          return new Response(JSON.stringify({ results: [{ projectId: "relay-firebase", displayName: "Relay Firebase" }] }), { status: 200 });
+        }
+        expect(url).toBe("https://firebase.googleapis.com/v1beta1/projects/relay-firebase");
+        return new Response(JSON.stringify({ projectId: "relay-firebase" }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const connected = await context.app.inject({
+      method: "PUT",
+      url: "/v1/connectors/firebase",
+      headers: authHeaders,
+      payload: { secret: refreshToken },
+    });
+    expect(connected.statusCode).toBe(200);
+    expect(connected.json()).toMatchObject({ provider: "firebase", connected: true, accountLabel: "Relay Firebase" });
+    expect(connected.body).not.toContain(refreshToken);
+
+    const requested = await context.app.inject({
+      method: "POST",
+      url: "/v1/connectors/firebase/request",
+      headers: authHeaders,
+      payload: { method: "GET", path: "v1beta1/projects/relay-firebase", headers: {}, body: null },
+    });
+    expect(requested.statusCode).toBe(200);
+    expect(requested.json()).toMatchObject({ status: 200, ok: true });
+    expect(tokenExchanges).toBe(2);
   });
 
   it("lets an agent manage a connector without exposing its credential", async () => {
