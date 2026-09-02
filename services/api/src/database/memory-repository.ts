@@ -9,6 +9,7 @@ export interface MemoryRepositoryState {
   events: RelayEvent[];
   jobs: Map<string, QueueJob>;
   idempotency: Map<string, { message: EntityMap["messages"]; runId: string }>;
+  scheduleLocks: Map<string, { lockedAt: string; lockedBy: string }>;
   cursor: number;
 }
 
@@ -25,10 +26,12 @@ export function createMemoryState(): MemoryRepositoryState {
       artifacts: new Map(),
       computers: new Map(),
       connectors: new Map(),
+      schedules: new Map(),
     },
     events: [],
     jobs: new Map(),
     idempotency: new Map(),
+    scheduleLocks: new Map(),
     cursor: 0,
   };
 }
@@ -68,6 +71,7 @@ export class MemoryRelayRepository implements RelayRepository {
       throw new Error(`Entity id '${value.id}' already belongs to another workspace`);
     }
     (this.state.entities[kind] as Map<string, EntityMap[K]>).set(value.id, structuredClone(value));
+    if (kind === "schedules") this.state.scheduleLocks.delete(value.id);
   }
 
   async delete(kind: EntityKind, id: string): Promise<boolean> {
@@ -77,6 +81,7 @@ export class MemoryRelayRepository implements RelayRepository {
         if (message.conversationId === id) this.state.entities.messages.delete(messageId);
       }
     }
+    if (kind === "schedules") this.state.scheduleLocks.delete(id);
     return deleted;
   }
 
@@ -186,5 +191,22 @@ export class MemoryRelayRepository implements RelayRepository {
       error,
       updatedAt: new Date().toISOString(),
     });
+  }
+
+  async claimDueSchedule(workspaceId: string, workerId: string, now: string): Promise<EntityMap["schedules"] | null> {
+    const staleBefore = new Date(new Date(now).getTime() - 5 * 60_000).toISOString();
+    const schedule = [...this.state.entities.schedules.values()]
+      .filter((candidate) => {
+        const lock = this.state.scheduleLocks.get(candidate.id);
+        return candidate.workspaceId === workspaceId && candidate.enabled && candidate.nextRunAt !== null && candidate.nextRunAt <= now && (!lock || lock.lockedAt < staleBefore);
+      })
+      .sort((left, right) => (left.nextRunAt ?? "").localeCompare(right.nextRunAt ?? ""))[0];
+    if (!schedule) return null;
+    this.state.scheduleLocks.set(schedule.id, { lockedAt: now, lockedBy: workerId });
+    return structuredClone(schedule);
+  }
+
+  async releaseScheduleClaim(id: string): Promise<void> {
+    this.state.scheduleLocks.delete(id);
   }
 }

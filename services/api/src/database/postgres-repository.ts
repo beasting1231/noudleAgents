@@ -17,6 +17,7 @@ const tables: Record<EntityKind, string> = {
   artifacts: "artifacts",
   computers: "computer_sessions",
   connectors: "connector_accounts",
+  schedules: "schedules",
 };
 
 function eventFromRow(row: Record<string, unknown>): RelayEvent {
@@ -132,11 +133,15 @@ export class PostgresRelayRepository implements RelayRepository {
       const artifact = value as EntityMap["artifacts"];
       columns.push("logical_id", "version", "parent_artifact_id", "checksum", "storage_key");
       params.push(artifact.logicalId, artifact.version, artifact.parentArtifactId, artifact.checksum, artifact.storageKey);
+    } else if (kind === "schedules") {
+      const schedule = value as EntityMap["schedules"];
+      columns.push("enabled", "next_run_at", "locked_at", "locked_by");
+      params.push(schedule.enabled, schedule.nextRunAt, null, null);
     }
     const placeholders = params.map((_, index) => `$${index + 1}`).join(",");
     const result = await this.pool.query(
       `INSERT INTO ${tables[kind]}(${columns.join(",")}) VALUES (${placeholders})
-       ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+       ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at${kind === "schedules" ? ", enabled=excluded.enabled, next_run_at=excluded.next_run_at, locked_at=NULL, locked_by=NULL" : ""}
        WHERE ${tables[kind]}.workspace_id=excluded.workspace_id
        RETURNING id`,
       params,
@@ -293,5 +298,24 @@ export class PostgresRelayRepository implements RelayRepository {
       "UPDATE queue_jobs SET status=$2,available_at=COALESCE($3,available_at),locked_at=NULL,locked_by=NULL,error=$4,updated_at=now() WHERE id=$1",
       [id, retryAt ? "queued" : "failed", retryAt, error],
     );
+  }
+
+  async claimDueSchedule(workspaceId: string, workerId: string, now: string): Promise<EntityMap["schedules"] | null> {
+    const result = await this.pool.query(
+      `WITH candidate AS (
+         SELECT id FROM schedules
+         WHERE workspace_id=$1 AND enabled=true AND next_run_at<=$3
+           AND (locked_at IS NULL OR locked_at<$3::timestamptz-interval '5 minutes')
+         ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT 1
+       )
+       UPDATE schedules SET locked_at=$3,locked_by=$2
+       WHERE id=(SELECT id FROM candidate) RETURNING data`,
+      [workspaceId, workerId, now],
+    );
+    return (result.rows[0]?.data as EntityMap["schedules"] | undefined) ?? null;
+  }
+
+  async releaseScheduleClaim(id: string): Promise<void> {
+    await this.pool.query("UPDATE schedules SET locked_at=NULL,locked_by=NULL WHERE id=$1", [id]);
   }
 }

@@ -5,16 +5,19 @@ import type {
   ComposerSettings,
   ConnectorProvider,
   ConnectorSummary,
+  CreateCustomConnectorInput,
   CreateAgentInput,
   CreateConversationInput,
   Message,
   Run,
+  Schedule,
   Task,
 } from "@noudle-agents/protocol";
 import {
   ArrowRight,
   ArrowUp,
   Bot,
+  CalendarClock,
   BookOpen,
   Check,
   ChevronDown,
@@ -23,6 +26,7 @@ import {
   CircleDot,
   Clock3,
   Command,
+  Container,
   Copy,
   CreditCard,
   FileCode2,
@@ -65,6 +69,7 @@ import { taskChildren, taskProgress, type DrawerTab } from "./state/relay-state"
 import { useRelay } from "./state/use-relay";
 import { formatBytes, type ArtifactRecord } from "./state/workspace-resources";
 import { useWorkspaceResources } from "./state/use-workspace-resources";
+import { useSchedules } from "./state/use-schedules";
 import { moveCommandSelection, resolveComposerEnter } from "./slash-commands";
 
 type DialogName = "agent" | "approvals" | "connection" | "connectors" | null;
@@ -202,6 +207,7 @@ function StatusDot({ status }: { status: Agent["status"] }) {
 export function App() {
   const { state, runs, dispatch, client, retry, createAgent, deleteAgent, createConversation, clearConversation, sendMessage, interruptAgent, resolveApproval } = useRelay();
   const resources = useWorkspaceResources(client, state.connection);
+  const scheduleResources = useSchedules(client, state.connection, state.cursor);
   const [dialog, setDialog] = useState<DialogName>(null);
   const [contextOpen, setContextOpen] = useState(true);
   const [contextWidth, setContextWidth] = useState(initialContextWidth);
@@ -451,6 +457,8 @@ export function App() {
             agent={selectedAgent}
             activeRun={selectedRun}
             messages={state.messages.filter(({ conversationId }) => conversationId === selectedConversation.id)}
+            demoMode={state.connection === "demo"}
+            onRetry={retry}
             onClear={async () => {
               try {
                 await clearConversation(selectedConversation);
@@ -491,6 +499,7 @@ export function App() {
         agentId={selectedAgent?.id ?? null}
         agents={state.agents}
         resources={resources}
+        scheduleResources={scheduleResources}
         width={contextWidth}
         resizing={contextResizing}
         onResizeStart={beginContextResize}
@@ -536,7 +545,7 @@ export function App() {
           }}
         />
       )}
-      {dialog === "connectors" && <ConnectorsDialog client={client} onClose={() => setDialog(null)} />}
+      {dialog === "connectors" && <ConnectorsDialog client={client} agents={state.agents} onClose={() => setDialog(null)} />}
       {paletteOpen && (
         <CommandPalette
           agents={state.agents}
@@ -720,11 +729,13 @@ function readComposerSettings(conversationId: string): ComposerSettings {
   }
 }
 
-function Chat({ conversation, agent, activeRun, messages, onClear, onSend, onStop }: {
+function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onClear, onSend, onStop }: {
   conversation: Conversation;
   agent: Agent | null;
   activeRun: Run | null;
   messages: Message[];
+  demoMode: boolean;
+  onRetry: () => Promise<boolean>;
   onClear: () => Promise<void>;
   onSend: (content: string, settings: ComposerSettings) => Promise<void>;
   onStop: () => Promise<void>;
@@ -741,6 +752,7 @@ function Chat({ conversation, agent, activeRun, messages, onClear, onSend, onSto
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const ordered = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const showDockerAction = demoMode && ordered.at(-1)?.role === "user";
   const agentRunning = Boolean(activeRun) || Boolean(agent && activeAgentStatuses.has(agent.status));
   const showStop = agentRunning && !value.trim();
   const commandQuery = value.startsWith("/") && !value.slice(1).includes(" ") && !value.includes("\n")
@@ -850,6 +862,7 @@ function Chat({ conversation, agent, activeRun, messages, onClear, onSend, onSto
         )}
         <div className="message-column">
           {ordered.map((message) => <MessageItem key={message.id} message={message} />)}
+          {showDockerAction && <DockerStartCard onRetry={onRetry} />}
         </div>
       </div>
       <div className="composer-wrap">
@@ -918,6 +931,47 @@ function Chat({ conversation, agent, activeRun, messages, onClear, onSend, onSto
   );
 }
 
+function DockerStartCard({ onRetry }: { onRetry: () => Promise<boolean> }) {
+  const [state, setState] = useState<"idle" | "starting" | "started" | "already-running" | "failed">("idle");
+  const [message, setMessage] = useState("The live agent service needs Docker Desktop.");
+
+  const start = async () => {
+    if (state === "starting") return;
+    if (!window.relayDesktop?.docker) {
+      setState("failed");
+      setMessage("Docker can only be started from the desktop app.");
+      return;
+    }
+
+    setState("starting");
+    setMessage("Checking Docker…");
+    const result = await window.relayDesktop.docker.start();
+    setState(result.status === "unsupported" ? "failed" : result.status);
+    setMessage(result.message);
+
+    if (result.status === "started") {
+      [4_000, 10_000, 20_000].forEach((delay) => {
+        window.setTimeout(() => void onRetry(), delay);
+      });
+    }
+  };
+
+  const settled = state === "started" || state === "already-running";
+  return (
+    <aside className={`docker-start-card docker-start-card--${state}`} role="status">
+      <span className="docker-start-icon"><Container size={18} /></span>
+      <span className="docker-start-copy">
+        <strong>{state === "already-running" ? "Docker is running" : state === "started" ? "Starting Docker" : "Start live agents"}</strong>
+        <small>{message}</small>
+      </span>
+      <button type="button" onClick={() => void start()} disabled={state === "starting" || settled}>
+        {state === "starting" && <LoaderCircle className="spin" size={13} />}
+        {state === "starting" ? "Starting" : settled ? "Done" : "Start Docker"}
+      </button>
+    </aside>
+  );
+}
+
 function ComposerSettingsRow({ label, value, active, onOpen }: { label: string; value: string; active: boolean; onOpen: () => void }) {
   return (
     <button type="button" role="menuitem" className={`composer-settings-row ${active ? "is-active" : ""}`} onClick={onOpen}>
@@ -952,7 +1006,7 @@ function EmptyConversation() {
   );
 }
 
-function ContextDrawer({ open, tab, onTab, onClose, task, agentId, agents, resources, width, resizing, onResizeStart, onResizeKeyDown }: {
+function ContextDrawer({ open, tab, onTab, onClose, task, agentId, agents, resources, scheduleResources, width, resizing, onResizeStart, onResizeKeyDown }: {
   open: boolean;
   tab: DrawerTab;
   onTab: (tab: DrawerTab) => void;
@@ -961,6 +1015,7 @@ function ContextDrawer({ open, tab, onTab, onClose, task, agentId, agents, resou
   agentId: string | null;
   agents: Agent[];
   resources: ReturnType<typeof useWorkspaceResources>;
+  scheduleResources: ReturnType<typeof useSchedules>;
   width: number;
   resizing: boolean;
   onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void;
@@ -993,9 +1048,158 @@ function ContextDrawer({ open, tab, onTab, onClose, task, agentId, agents, resou
       </div>
       <div className="context-content">
         {activeTab === "files" && <FilesContext resources={resources} task={task} agents={agents} />}
-        {activeTab === "computer" && <ComputerContext resources={resources} agentId={agentId} />}
+        {activeTab === "computer" && <div className="computer-tab-content"><ComputerContext resources={resources} agentId={agentId} /><SchedulesContext schedules={scheduleResources} agentId={agentId} agents={agents} /></div>}
       </div>
     </aside>
+  );
+}
+
+function scheduleCadence(expression: string): string {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = expression.trim().split(/\s+/);
+  if (minute?.startsWith("*/") && hour === "*" && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") {
+    return `Every ${minute.slice(2)} minutes`;
+  }
+  const numericMinute = Number(minute);
+  const numericHour = Number(hour);
+  const time = Number.isInteger(numericMinute) && Number.isInteger(numericHour)
+    ? `${String(numericHour).padStart(2, "0")}:${String(numericMinute).padStart(2, "0")}`
+    : null;
+  if (time && dayOfMonth === "*" && month === "*" && dayOfWeek === "*") return `Daily at ${time}`;
+  if (time && dayOfMonth === "*" && month === "*" && dayOfWeek) {
+    const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const days = dayOfWeek.split(",").map((value) => {
+      const range = value.split("-");
+      if (range.length === 2) {
+        const from = Number(range[0]);
+        const to = Number(range[1]);
+        if (Number.isInteger(from) && Number.isInteger(to)) return `${names[from === 7 ? 0 : from] ?? from}–${names[to === 7 ? 0 : to] ?? to}`;
+      }
+      return names[Number(value) === 7 ? 0 : Number(value)] ?? value;
+    }).join(" + ");
+    return `${days} at ${time}`;
+  }
+  return expression;
+}
+
+function SchedulesContext({ schedules: resource, agentId, agents }: {
+  schedules: ReturnType<typeof useSchedules>;
+  agentId: string | null;
+  agents: Agent[];
+}) {
+  const [editing, setEditing] = useState<string | "new" | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const visible = resource.schedules
+    .filter((schedule) => !agentId || schedule.agentId === agentId)
+    .sort((left, right) => (left.nextRunAt ?? "z").localeCompare(right.nextRunAt ?? "z"));
+  const selected = editing && editing !== "new" ? resource.schedules.find(({ id }) => id === editing) ?? null : null;
+  const defaultAgentId = agentId ?? agents[0]?.id ?? "";
+
+  const toggle = async (schedule: Schedule) => {
+    setBusy(schedule.id); setLocalError(null);
+    try { await resource.updateSchedule(schedule.id, { enabled: !schedule.enabled }); }
+    catch (error) { setLocalError(error instanceof Error ? error.message : "Schedule could not be updated."); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <section className="schedules-section" aria-label="Schedules">
+      <header className="schedules-heading">
+        <button disabled={!defaultAgentId} onClick={() => setEditing("new")} aria-label="New automation" title="New automation"><Plus size={14} /></button>
+      </header>
+      {(localError || resource.error) && <div className="resource-error"><CircleAlert size={13} /><span>{localError ?? resource.error}</span></div>}
+      {resource.loading ? <div className="schedule-loading"><LoaderCircle className="spin" size={14} /> Loading schedules</div> : visible.length === 0 ? (
+        <button className="schedule-empty" onClick={() => setEditing("new")} disabled={!defaultAgentId}><CalendarClock size={18} /><span><strong>No scheduled jobs</strong><small>Ask this agent, or add one here.</small></span></button>
+      ) : (
+        <div className="schedule-list">
+          {visible.map((schedule) => (
+            <article className={`schedule-card ${schedule.enabled ? "is-enabled" : "is-disabled"}`} key={schedule.id}>
+              <button className="schedule-card-body" onClick={() => setEditing(schedule.id)} aria-label={`Configure ${schedule.title}`}>
+                <span className="schedule-mark">{schedule.triggerType === "webhook" ? <Zap size={14} /> : <CalendarClock size={14} />}</span>
+                <span className="schedule-copy"><strong>{schedule.title}</strong><small>{schedule.triggerType === "webhook" ? "Webhook · POST" : `${scheduleCadence(schedule.cronExpression)} · ${schedule.timezone}`}</small><em>{!schedule.enabled ? "Paused" : schedule.triggerType === "webhook" ? "Waiting for request" : schedule.nextRunAt ? `Next ${relativeTime(schedule.nextRunAt)}` : "Scheduled"}</em></span>
+              </button>
+              <button
+                className={`schedule-toggle ${schedule.enabled ? "is-on" : ""}`}
+                role="switch"
+                aria-checked={schedule.enabled}
+                aria-label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.title}`}
+                disabled={busy === schedule.id}
+                onClick={() => void toggle(schedule)}
+              ><span /></button>
+            </article>
+          ))}
+        </div>
+      )}
+      {editing && (
+        <ScheduleEditor
+          key={selected?.id ?? "new"}
+          schedule={selected}
+          agentId={defaultAgentId}
+          agents={agents}
+          webhookUrl={selected ? resource.webhookUrl(selected) : null}
+          busy={busy === (selected?.id ?? "new")}
+          onCancel={() => { setEditing(null); setLocalError(null); }}
+          onSave={async (input) => {
+            setBusy(selected?.id ?? "new"); setLocalError(null);
+            try {
+              if (selected) await resource.updateSchedule(selected.id, input);
+              else await resource.createSchedule({ ...input, agentId: input.agentId ?? defaultAgentId, title: input.title ?? "", prompt: input.prompt ?? "", cronExpression: input.cronExpression ?? "0 9 * * *" });
+              setEditing(null);
+            } catch (error) { setLocalError(error instanceof Error ? error.message : "Schedule could not be saved."); }
+            finally { setBusy(null); }
+          }}
+          {...(selected ? { onDelete: async () => {
+            setBusy(selected.id); setLocalError(null);
+            try { await resource.deleteSchedule(selected.id); setEditing(null); }
+            catch (error) { setLocalError(error instanceof Error ? error.message : "Schedule could not be deleted."); }
+            finally { setBusy(null); }
+          } } : {})}
+        />
+      )}
+    </section>
+  );
+}
+
+function ScheduleEditor({ schedule, agentId, agents, webhookUrl, busy, onCancel, onSave, onDelete }: {
+  schedule: Schedule | null;
+  agentId: string;
+  agents: Agent[];
+  webhookUrl: string | null;
+  busy: boolean;
+  onCancel: () => void;
+  onSave: (input: { triggerType: "cron" | "webhook"; title: string; prompt: string; cronExpression: string; timezone: string; enabled: boolean; agentId: string }) => Promise<void>;
+  onDelete?: () => Promise<void>;
+}) {
+  const [title, setTitle] = useState(schedule?.title ?? "");
+  const [prompt, setPrompt] = useState(schedule?.prompt ?? "");
+  const [triggerType, setTriggerType] = useState<"cron" | "webhook">(schedule?.triggerType ?? "cron");
+  const [cronExpression, setCronExpression] = useState(schedule?.cronExpression ?? "0 9 * * *");
+  const [timezone, setTimezone] = useState(schedule?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC");
+  const [ownerId, setOwnerId] = useState(schedule?.agentId ?? agentId);
+  const [copied, setCopied] = useState(false);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim() || !prompt.trim() || !cronExpression.trim() || !timezone.trim() || !ownerId) return;
+    void onSave({ triggerType, title: title.trim(), prompt: prompt.trim(), cronExpression: cronExpression.trim(), timezone: timezone.trim(), enabled: schedule?.enabled ?? true, agentId: ownerId });
+  };
+  return (
+    <form className="schedule-editor" onSubmit={submit}>
+      <div className="schedule-editor-title"><strong>{schedule ? "Configure automation" : "New automation"}</strong><button type="button" onClick={onCancel} aria-label="Close automation editor"><X size={13} /></button></div>
+      <label><span>Name</span><input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Morning project digest" /></label>
+      <label><span>Instruction</span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="What should the agent do?" rows={3} /></label>
+      <label><span>Trigger</span><select value={triggerType} onChange={(event) => setTriggerType(event.target.value as "cron" | "webhook")}><option value="cron">Schedule</option><option value="webhook">Webhook</option></select></label>
+      {triggerType === "cron" ? <div className="schedule-editor-grid">
+        <label><span>Schedule</span><input value={cronExpression} onChange={(event) => setCronExpression(event.target.value)} placeholder="*/5 * * * *" /><small>minute · hour · day · month · weekday</small></label>
+        <label><span>Timezone</span><input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="Europe/Amsterdam" /></label>
+      </div> : webhookUrl ? <label className="webhook-field"><span>Webhook URL</span><div><input readOnly value={webhookUrl} /><button type="button" onClick={async () => { await navigator.clipboard.writeText(webhookUrl); setCopied(true); window.setTimeout(() => setCopied(false), 1600); }} aria-label="Copy webhook URL">{copied ? <Check size={12} /> : <Copy size={12} />}</button></div><small>Send a POST request with an optional JSON body.</small></label> : <div className="webhook-notice"><Zap size={13} /><span>A private webhook URL will be generated when you save.</span></div>}
+      {!schedule && agents.length > 1 && <label><span>Agent</span><select value={ownerId} onChange={(event) => setOwnerId(event.target.value)}>{agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}</select></label>}
+      <div className="schedule-editor-actions">
+        {onDelete && <button type="button" className="schedule-delete" disabled={busy} onClick={() => void onDelete()}><Trash2 size={12} /> Delete</button>}
+        <span />
+        <button type="button" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="schedule-save" disabled={busy || !title.trim() || !prompt.trim()}>{busy ? <LoaderCircle className="spin" size={12} /> : "Save"}</button>
+      </div>
+    </form>
   );
 }
 
@@ -1153,8 +1357,12 @@ function ActivityContext({ tasks, messages, agents }: { tasks: Task[]; messages:
 function ComputerContext({ resources, agentId }: { resources: ReturnType<typeof useWorkspaceResources>; agentId: string | null }) {
   const { state } = resources;
   const [expanded, setExpanded] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
   const computer = agentId
-    ? state.computers.find((candidate) => candidate.agentId === agentId && candidate.browser && candidate.status === "running") ?? null
+    ? state.computers.find((candidate) => candidate.agentId === null && candidate.browser && candidate.status === "running")
+      ?? state.computers.find((candidate) => candidate.agentId === agentId && candidate.browser && candidate.status === "running")
+      ?? null
     : state.computers.find(({ id }) => id === state.selectedComputerId) ?? null;
   const safeComputerUrl = useMemo(() => {
     if (!computer?.computerUrl) return null;
@@ -1171,6 +1379,7 @@ function ComputerContext({ resources, agentId }: { resources: ReturnType<typeof 
       return null;
     }
   }, [computer?.computerUrl]);
+  const controlled = computer?.controlMode === "user";
 
   useEffect(() => {
     if (!expanded) return;
@@ -1179,13 +1388,33 @@ function ComputerContext({ resources, agentId }: { resources: ReturnType<typeof 
       event.preventDefault();
       withViewTransition(() => setExpanded(false));
     };
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type !== "relay-computer-escape" || !safeComputerUrl) return;
+      if (event.origin !== new URL(safeComputerUrl).origin) return;
+      withViewTransition(() => setExpanded(false));
+    };
     document.body.classList.add("computer-is-expanded");
     window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("message", onMessage);
     return () => {
       document.body.classList.remove("computer-is-expanded");
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("message", onMessage);
     };
-  }, [expanded]);
+  }, [expanded, safeComputerUrl]);
+
+  const toggleControl = async () => {
+    if (!computer || controlBusy) return;
+    setControlBusy(true);
+    setControlError(null);
+    try {
+      await resources.updateComputerControl(computer, controlled ? "return" : "takeover");
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : "Could not change computer control.");
+    } finally {
+      setControlBusy(false);
+    }
+  };
 
   const panel = (
     <div className={`computer-context ${expanded ? "is-expanded" : ""}`}>
@@ -1195,13 +1424,17 @@ function ComputerContext({ resources, agentId }: { resources: ReturnType<typeof 
         title={expanded ? "Close fullscreen (Esc)" : "Fullscreen"}
         onClick={() => withViewTransition(() => setExpanded((value) => !value))}
       >{expanded ? <X size={15} /> : <Maximize2 size={14} />}</button>
-      <div className="computer-live-frame">
+      <div className={`computer-live-frame ${controlled ? "is-controlled" : "is-watch-only"}`}>
         {safeComputerUrl ? (
           <iframe src={safeComputerUrl} title="Virtual machine" sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock allow-downloads" allow="clipboard-read; clipboard-write" referrerPolicy="no-referrer" />
         ) : (
           <div className="computer-canvas"><Monitor size={31} /><span>No active session</span></div>
         )}
       </div>
+      {computer && <button className={`computer-control-button ${controlled ? "return-control" : "take-control"}`} disabled={controlBusy} onClick={() => void toggleControl()}>
+        {controlBusy && <LoaderCircle className="spin" size={12} />}{controlled ? "Give back PC" : "Take control"}
+      </button>}
+      {controlError && <p className="computer-control-error" role="alert">{controlError}</p>}
     </div>
   );
   return expanded ? createPortal(panel, document.body) : panel;
@@ -1261,23 +1494,28 @@ const CONNECTOR_META: Record<ConnectorProvider, { name: string; credential: stri
   stripe: { name: "Stripe", credential: "Secret or restricted API key", placeholder: "sk_… or rk_…", icon: CreditCard },
 };
 
-function ConnectorsDialog({ client, onClose }: { client: ReturnType<typeof useRelay>["client"]; onClose: () => void }) {
+function ConnectorsDialog({ client, agents, onClose }: { client: ReturnType<typeof useRelay>["client"]; agents: Agent[]; onClose: () => void }) {
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
-  const [editing, setEditing] = useState<ConnectorProvider | null>(null);
+  const [editing, setEditing] = useState<ConnectorProvider | "custom" | null>(null);
   const [secret, setSecret] = useState("");
-  const [busy, setBusy] = useState<ConnectorProvider | null>(null);
+  const [custom, setCustom] = useState<CreateCustomConnectorInput>({ name: "", baseUrl: "", authType: "bearer", headerName: null, authPrefix: "", secret: "" });
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    client.listConnectors()
+    const load = () => client.listConnectors()
       .then((items) => { if (active) setConnectors(items); })
       .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : "Could not load connectors."); });
-    return () => { active = false; };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
   }, [client]);
 
   const update = (connector: ConnectorSummary) => {
-    setConnectors((items) => items.map((item) => item.provider === connector.provider ? connector : item));
+    setConnectors((items) => items.some((item) => item.id === connector.id)
+      ? items.map((item) => item.id === connector.id ? connector : item)
+      : [...items, connector]);
   };
 
   const connect = async (provider: ConnectorProvider) => {
@@ -1291,32 +1529,72 @@ function ConnectorsDialog({ client, onClose }: { client: ReturnType<typeof useRe
     } finally { setBusy(null); }
   };
 
-  const disconnect = async (provider: ConnectorProvider) => {
+  const remove = async (connector: ConnectorSummary) => {
     if (busy) return;
-    setBusy(provider); setError(null);
+    setBusy(connector.id); setError(null);
     try {
-      await client.disconnectConnector(provider);
-      update({ provider, connected: false, accountLabel: null, connectedAt: null, updatedAt: null });
+      await client.deleteConnector(connector.id);
+      setConnectors(await client.listConnectors());
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not disconnect.");
+      setError(caught instanceof Error ? caught.message : "Could not remove connector.");
     } finally { setBusy(null); }
   };
+
+  const createCustom = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!custom.name.trim() || !custom.baseUrl.trim() || !custom.secret.trim() || busy) return;
+    setBusy("custom"); setError(null);
+    try {
+      update(await client.createConnector(custom));
+      setCustom({ name: "", baseUrl: "", authType: "bearer", headerName: null, authPrefix: "", secret: "" });
+      setEditing(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not create connector.");
+    } finally { setBusy(null); }
+  };
+
+  const creator = (connector: ConnectorSummary) => {
+    if (!connector.createdById) return "Shared workspace connector";
+    if (connector.createdByType === "user") return "Shared · added by you";
+    return `Shared · added by ${agents.find((agent) => agent.id === connector.createdById)?.name ?? "an agent"}`;
+  };
+
+  const builtins = connectors.filter((connector) => connector.kind === "builtin");
+  const customConnectors = connectors.filter((connector) => connector.kind === "custom");
 
   return (
     <DialogShell title="Connectors" onClose={onClose} minimal>
       <div className="connector-list">
+        <div className="connector-toolbar">
+          <span>Available to every agent</span>
+          <button onClick={() => { setEditing(editing === "custom" ? null : "custom"); setError(null); }}><Plus size={13} />New connector</button>
+        </div>
+        {editing === "custom" && (
+          <form className="connector-create" onSubmit={(event) => void createCustom(event)}>
+            <div className="connector-create-grid">
+              <label><span>Name</span><input autoFocus value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} placeholder="Hostinger" /></label>
+              <label><span>HTTPS base URL</span><input value={custom.baseUrl} onChange={(event) => setCustom({ ...custom, baseUrl: event.target.value })} placeholder="https://api.example.com/v1/" /></label>
+            </div>
+            <div className="connector-create-grid connector-create-grid--auth">
+              <label><span>Authentication</span><select value={custom.authType} onChange={(event) => setCustom({ ...custom, authType: event.target.value as CreateCustomConnectorInput["authType"] })}><option value="bearer">Bearer token</option><option value="header">API key header</option><option value="basic">Basic credential</option></select></label>
+              {custom.authType === "header" && <label><span>Header name</span><input value={custom.headerName ?? ""} onChange={(event) => setCustom({ ...custom, headerName: event.target.value })} placeholder="X-API-Key" /></label>}
+              <label><span>Secret</span><input type="password" value={custom.secret} onChange={(event) => setCustom({ ...custom, secret: event.target.value })} placeholder="Encrypted after saving" autoComplete="off" spellCheck={false} /></label>
+            </div>
+            <div className="connector-create-actions"><button type="button" onClick={() => setEditing(null)}>Cancel</button><button disabled={busy === "custom" || !custom.name.trim() || !custom.baseUrl.trim() || !custom.secret.trim()}>{busy === "custom" ? "Saving…" : "Save for team"}</button></div>
+          </form>
+        )}
         {(["github", "resend", "notion", "stripe"] as ConnectorProvider[]).map((provider) => {
           const meta = CONNECTOR_META[provider];
-          const connector = connectors.find((item) => item.provider === provider);
+          const connector = builtins.find((item) => item.provider === provider);
           const connected = Boolean(connector?.connected);
           const Icon = meta.icon;
           return (
             <div className={`connector-card ${editing === provider ? "is-editing" : ""}`} key={provider}>
               <div className="connector-card-main">
                 <span className="connector-mark"><Icon size={18} /></span>
-                <div><strong>{meta.name}</strong>{connected && <small>{connector?.accountLabel}</small>}</div>
+                <div><strong>{meta.name}</strong><small>{connected && connector ? `${connector.accountLabel} · ${creator(connector)}` : "Built-in connector"}</small></div>
                 {connected ? (
-                  <button className="connector-action connector-action--muted" disabled={busy === provider} onClick={() => void disconnect(provider)}>{busy === provider ? "…" : "Disconnect"}</button>
+                  <button className="connector-action connector-action--muted" disabled={busy === connector?.id} onClick={() => connector && void remove(connector)}>{busy === connector?.id ? "…" : "Disconnect"}</button>
                 ) : (
                   <button className="connector-action" onClick={() => { setEditing(provider); setSecret(""); setError(null); }}>Connect</button>
                 )}
@@ -1331,6 +1609,15 @@ function ConnectorsDialog({ client, onClose }: { client: ReturnType<typeof useRe
             </div>
           );
         })}
+        {customConnectors.map((connector) => (
+          <div className="connector-card" key={connector.id}>
+            <div className="connector-card-main">
+              <span className="connector-mark connector-mark--custom"><Network size={18} /></span>
+              <div><strong>{connector.name}</strong><small>{connector.accountLabel} · {creator(connector)}</small></div>
+              <button className="connector-action connector-action--muted" disabled={busy === connector.id} onClick={() => void remove(connector)}>{busy === connector.id ? "…" : "Remove"}</button>
+            </div>
+          </div>
+        ))}
         {error && <p className="form-error"><CircleAlert size={14} />{error}</p>}
       </div>
     </DialogShell>

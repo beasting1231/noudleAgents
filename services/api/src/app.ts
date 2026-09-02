@@ -5,10 +5,12 @@ import {
   AgentStatusSchema,
   CreateAgentInputSchema,
   CreateConversationInputSchema,
+  CreateScheduleInputSchema,
   CreateTaskInputSchema,
   DelegateTaskInputSchema,
   SendMessageInputSchema,
   TaskStatusSchema,
+  UpdateScheduleInputSchema,
 } from "@noudle-agents/protocol";
 import { z, ZodError } from "zod";
 import { loadConfig, type RelayConfig } from "./config.js";
@@ -31,6 +33,7 @@ import { RunWorker } from "./worker.js";
 
 const IdParamsSchema = z.object({ id: z.string().min(1).max(160) });
 const ConversationParamsSchema = z.object({ conversationId: z.string().min(1).max(160) });
+const WebhookParamsSchema = z.object({ id: z.string().min(1).max(160), token: z.string().min(32).max(200) });
 const AgentPatchSchema = z
   .object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -76,6 +79,14 @@ const CollaborationMessageSchema = z
     taskId: z.string().min(1).max(160),
     message: z.string().trim().min(1).max(200_000),
     contextRefs: z.array(z.string().min(1).max(160)).max(50).default([]),
+  })
+  .strict();
+const AgentHelpRequestSchema = z
+  .object({
+    agentId: z.string().min(1).max(160),
+    taskId: z.string().min(1).max(160),
+    request: z.string().trim().min(1).max(20_000),
+    paths: z.array(z.string().trim().min(1).max(1000).refine((value) => !value.includes("\u0000"))).max(50).default([]),
   })
   .strict();
 const BlockTaskSchema = z.object({ blocker: z.string().trim().min(1).max(4000), needsUser: z.boolean().default(false) }).strict();
@@ -185,7 +196,7 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
   });
 
   app.addHook("onRequest", async (request, reply) => {
-    if (request.url === "/health" || request.method === "OPTIONS") return;
+    if (request.url === "/health" || request.method === "OPTIONS" || (request.method === "POST" && request.url.startsWith("/v1/webhooks/"))) return;
     const query = request.query as { token?: string } | undefined;
     const eventToken = request.url.startsWith("/v1/events") ? (query?.token ?? null) : null;
     const token = bearerToken(request.headers.authorization) ?? eventToken;
@@ -300,6 +311,45 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
     return service.sendMessage(ConversationParamsSchema.parse(request.params).conversationId, input);
   });
 
+  app.get("/v1/schedules", async (request) => {
+    const schedules = await service.listSchedules();
+    const actorId = agentActor(request);
+    return actorId ? schedules.filter((schedule) => schedule.agentId === actorId) : schedules;
+  });
+  app.get("/v1/schedules/:id", (request) => service.getSchedule(IdParamsSchema.parse(request.params).id));
+  app.post("/v1/schedules", async (request, reply) => {
+    const actorId = agentActor(request);
+    const schedule = await service.createSchedule(
+      CreateScheduleInputSchema.parse(request.body),
+      actorId ? "agent" : "user",
+      actorId ?? config.ownerId,
+    );
+    return reply.code(201).send(schedule);
+  });
+  app.patch("/v1/schedules/:id", (request) => {
+    const actorId = agentActor(request);
+    return service.updateSchedule(
+      IdParamsSchema.parse(request.params).id,
+      UpdateScheduleInputSchema.parse(request.body),
+      actorId ? "agent" : "user",
+      actorId ?? config.ownerId,
+    );
+  });
+  app.delete("/v1/schedules/:id", async (request, reply) => {
+    const actorId = agentActor(request);
+    await service.deleteSchedule(
+      IdParamsSchema.parse(request.params).id,
+      actorId ? "agent" : "user",
+      actorId ?? config.ownerId,
+    );
+    return reply.code(204).send();
+  });
+  app.post("/v1/webhooks/:id/:token", async (request, reply) => {
+    const { id, token } = WebhookParamsSchema.parse(request.params);
+    const result = await service.triggerWebhook(id, token, request.body ?? {});
+    return reply.code(202).send({ accepted: true, ...result });
+  });
+
   app.get("/v1/tasks", () => service.listTasks());
   app.get("/v1/tasks/:id", (request) => service.getTask(IdParamsSchema.parse(request.params).id));
   app.post("/v1/tasks", async (request, reply) => {
@@ -353,6 +403,21 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
       input.contextRefs,
     );
   });
+  app.post("/v1/collaboration/requests", async (request, reply) => {
+    const input = AgentHelpRequestSchema.parse(request.body);
+    const result = await service.requestAgentHelp(
+      requiredAgentActor(request),
+      input.agentId,
+      input.taskId,
+      input.request,
+      input.paths,
+    );
+    return reply.code(201).send(result);
+  });
+  app.get("/v1/collaboration/requests/:id", (request) => service.readAgentHelp(
+    requiredAgentActor(request),
+    IdParamsSchema.parse(request.params).id,
+  ));
 
   app.get("/v1/runs", () => service.listRuns());
   app.get("/v1/runs/:id", (request) => service.getRun(IdParamsSchema.parse(request.params).id));

@@ -173,12 +173,65 @@ export const ArtifactSchema = z.object({
 });
 
 export const ConnectorProviderSchema = z.enum(["github", "resend", "notion", "stripe"]);
+export const ConnectorAuthTypeSchema = z.enum(["bearer", "header", "basic"]);
 export const ConnectorSummarySchema = z.object({
-  provider: ConnectorProviderSchema,
+  id: IdSchema,
+  provider: z.string().min(1).max(80),
+  kind: z.enum(["builtin", "custom"]),
+  name: z.string().min(1).max(100),
+  baseUrl: z.string().url().nullable(),
+  authType: ConnectorAuthTypeSchema,
+  headerName: z.string().min(1).max(100).nullable(),
   connected: z.boolean(),
   accountLabel: z.string().nullable(),
+  createdByType: z.enum(["user", "agent"]).nullable(),
+  createdById: IdSchema.nullable(),
   connectedAt: TimestampSchema.nullable(),
   updatedAt: TimestampSchema.nullable(),
+});
+
+export const CreateCustomConnectorInputSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  baseUrl: z.string().trim().url().max(2000),
+  authType: ConnectorAuthTypeSchema.default("bearer"),
+  headerName: z.string().trim().min(1).max(100).nullable().default(null),
+  authPrefix: z.string().max(100).default(""),
+  secret: z.string().trim().min(1).max(10_000),
+}).strict();
+
+export const ConnectorRequestInputSchema = z.object({
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"),
+  path: z.string().min(1).max(4000),
+  headers: z.record(z.string().min(1).max(100), z.string().max(4000)).default({}),
+  body: z.string().max(2_000_000).nullable().default(null),
+}).strict();
+
+export const ConnectorResponseSchema = z.object({
+  status: z.number().int().min(100).max(599),
+  ok: z.boolean(),
+  headers: z.record(z.string(), z.string()),
+  body: z.string(),
+});
+
+export const ScheduleSchema = z.object({
+  id: IdSchema,
+  workspaceId: IdSchema,
+  triggerType: z.enum(["cron", "webhook"]),
+  agentId: IdSchema,
+  conversationId: IdSchema,
+  title: z.string().trim().min(1).max(160),
+  prompt: z.string().trim().min(1).max(200_000),
+  cronExpression: z.string().trim().min(9).max(120),
+  timezone: z.string().trim().min(1).max(120),
+  enabled: z.boolean(),
+  nextRunAt: TimestampSchema.nullable(),
+  lastRunAt: TimestampSchema.nullable(),
+  latestRunId: IdSchema.nullable(),
+  webhookToken: z.string().min(32).max(200).nullable().default(null),
+  createdByType: z.enum(["user", "agent"]),
+  createdById: IdSchema,
+  createdAt: TimestampSchema,
+  updatedAt: TimestampSchema,
 });
 
 export const EventTypeSchema = z.enum([
@@ -210,6 +263,10 @@ export const EventTypeSchema = z.enum([
   "tool.completed",
   "computer.updated",
   "connector.updated",
+  "schedule.created",
+  "schedule.updated",
+  "schedule.deleted",
+  "schedule.triggered",
 ]);
 
 export const RelayEventSchema = z.object({
@@ -275,6 +332,32 @@ export const DelegateTaskInputSchema = z.object({
   contextRefs: z.array(IdSchema).max(50).default([]),
 });
 
+export const CreateScheduleInputSchema = ScheduleSchema.pick({
+  triggerType: true,
+  agentId: true,
+  conversationId: true,
+  title: true,
+  prompt: true,
+  cronExpression: true,
+  timezone: true,
+  enabled: true,
+}).partial({ triggerType: true, conversationId: true, cronExpression: true, timezone: true, enabled: true }).superRefine((value, context) => {
+  if ((value.triggerType ?? "cron") === "cron" && !value.cronExpression) {
+    context.addIssue({ code: "custom", path: ["cronExpression"], message: "Cron schedules require a cronExpression" });
+  }
+});
+
+export const UpdateScheduleInputSchema = ScheduleSchema.pick({
+  triggerType: true,
+  agentId: true,
+  conversationId: true,
+  title: true,
+  prompt: true,
+  cronExpression: true,
+  timezone: true,
+  enabled: true,
+}).partial().refine((value) => Object.keys(value).length > 0, "At least one schedule field is required");
+
 export type Agent = z.infer<typeof AgentSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type Conversation = z.infer<typeof ConversationSchema>;
@@ -285,7 +368,12 @@ export type Run = z.infer<typeof RunSchema>;
 export type Approval = z.infer<typeof ApprovalSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type ConnectorProvider = z.infer<typeof ConnectorProviderSchema>;
+export type ConnectorAuthType = z.infer<typeof ConnectorAuthTypeSchema>;
 export type ConnectorSummary = z.infer<typeof ConnectorSummarySchema>;
+export type CreateCustomConnectorInput = z.infer<typeof CreateCustomConnectorInputSchema>;
+export type ConnectorRequestInput = z.infer<typeof ConnectorRequestInputSchema>;
+export type ConnectorResponse = z.infer<typeof ConnectorResponseSchema>;
+export type Schedule = z.infer<typeof ScheduleSchema>;
 export type RelayEvent = z.infer<typeof RelayEventSchema>;
 export type CreateAgentInput = z.infer<typeof CreateAgentInputSchema>;
 export type CreateConversationInput = z.infer<typeof CreateConversationInputSchema>;
@@ -293,6 +381,8 @@ export type SendMessageInput = z.infer<typeof SendMessageInputSchema>;
 export type ComposerSettings = z.infer<typeof ComposerSettingsSchema>;
 export type CreateTaskInput = z.infer<typeof CreateTaskInputSchema>;
 export type DelegateTaskInput = z.infer<typeof DelegateTaskInputSchema>;
+export type CreateScheduleInput = z.infer<typeof CreateScheduleInputSchema>;
+export type UpdateScheduleInput = z.infer<typeof UpdateScheduleInputSchema>;
 
 export const DEFAULT_WORKSPACE_ID = "workspace_local";
 export const LOCAL_OWNER_ID = "user_local_owner";

@@ -8,8 +8,10 @@ export function requireSafeKey(value: string, label: string): string {
 }
 
 export function resolveWorkspace(root: string, key: string): string {
-  requireSafeKey(key, "workspaceKey");
-  const candidate = path.resolve(root, key);
+  const segments = key.split("/");
+  if (segments.length === 0 || segments.length > 8) throw new Error("workspaceKey contains too many path segments");
+  for (const segment of segments) requireSafeKey(segment, "workspaceKey segment");
+  const candidate = path.resolve(root, ...segments);
   const relative = path.relative(root, candidate);
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Workspace escaped the configured root");
   return candidate;

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { startDocker } from "./docker";
 
 const isMac = process.platform === "darwin";
 
@@ -49,6 +50,7 @@ app.whenReady().then(() => {
     window.isMaximized() ? window.unmaximize() : window.maximize();
   });
   ipcMain.handle("relay:window:close", (event) => BrowserWindow.fromWebContents(event.sender)?.close());
+  ipcMain.handle("relay:docker:start", () => startDocker());
 
   createWindow();
   app.on("activate", () => {

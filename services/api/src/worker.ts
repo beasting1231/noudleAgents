@@ -44,6 +44,7 @@ export class RunWorker {
   }
 
   async drainOnce(): Promise<boolean> {
+    if (await this.dispatchOneSchedule()) return true;
     const job = await this.repository.claim(this.config.workspaceId, this.workerId, ["agent.run"]);
     if (!job) return false;
     await this.process(job);
@@ -54,6 +55,9 @@ export class RunWorker {
     if (this.polling) return;
     this.polling = true;
     try {
+      for (let dispatched = 0; dispatched < 25 && await this.dispatchOneSchedule(); dispatched += 1) {
+        // Bound each poll so a large backlog cannot starve active agent runs.
+      }
       while (this.active.size < this.config.maxConcurrentRuns) {
         const job = await this.repository.claim(this.config.workspaceId, this.workerId, ["agent.run"]);
         if (!job) break;
@@ -64,6 +68,19 @@ export class RunWorker {
     } finally {
       this.polling = false;
     }
+  }
+
+  private async dispatchOneSchedule(): Promise<boolean> {
+    const now = new Date().toISOString();
+    const schedule = await this.repository.claimDueSchedule(this.config.workspaceId, this.workerId, now);
+    if (!schedule) return false;
+    try {
+      await this.service.triggerSchedule(schedule, schedule.nextRunAt ?? now);
+    } catch {
+      await this.repository.releaseScheduleClaim(schedule.id);
+      return false;
+    }
+    return true;
   }
 
   private async setAgentRunning(agent: Agent, taskId: string | null): Promise<Agent> {

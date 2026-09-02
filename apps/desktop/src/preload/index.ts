@@ -8,6 +8,9 @@ const desktop = {
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke("relay:window:toggle-maximize"),
     close: (): Promise<void> => ipcRenderer.invoke("relay:window:close"),
   },
+  docker: {
+    start: (): Promise<import("../main/docker").DockerStartResult> => ipcRenderer.invoke("relay:docker:start"),
+  },
 };
 
 contextBridge.exposeInMainWorld("relayDesktop", desktop);

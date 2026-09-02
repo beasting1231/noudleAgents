@@ -42,7 +42,11 @@ export class CodexProcess extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.client) return;
-    await fs.mkdir(this.config.workspaceRoot, { recursive: true });
+    await Promise.all([
+      fs.mkdir(path.join(this.config.workspaceRoot, "agents"), { recursive: true }),
+      fs.mkdir(path.join(this.config.workspaceRoot, "projects"), { recursive: true }),
+      fs.mkdir(path.join(this.config.workspaceRoot, "team"), { recursive: true }),
+    ]);
     const env = { ...process.env };
     // A worker started from inside the Codex desktop app must not inherit the
     // parent task's tool pipe or identity. noudleAgents owns its own threads and MCP

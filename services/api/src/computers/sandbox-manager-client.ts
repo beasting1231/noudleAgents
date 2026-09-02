@@ -32,6 +32,8 @@ export interface DesktopActionResult {
 export interface SandboxManagerGateway {
   list(): Promise<SandboxInfo[]>;
   create(input: CreateSandboxInput): Promise<SandboxInfo>;
+  start(id: string): Promise<SandboxInfo>;
+  stop(id: string): Promise<SandboxInfo>;
   get(id: string): Promise<SandboxInfo | null>;
   exec(id: string, command: string[], timeoutMs: number): Promise<SandboxExecResult>;
   browserNavigate(id: string, url: string): Promise<{ url: string; title: string }>;
@@ -75,6 +77,14 @@ export class HttpSandboxManagerClient implements SandboxManagerGateway {
 
   create(input: CreateSandboxInput): Promise<SandboxInfo> {
     return this.request("/v1/sandboxes", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  start(id: string): Promise<SandboxInfo> {
+    return this.request(`/v1/sandboxes/${encodeURIComponent(id)}/start`, { method: "POST" });
+  }
+
+  stop(id: string): Promise<SandboxInfo> {
+    return this.request(`/v1/sandboxes/${encodeURIComponent(id)}/stop`, { method: "POST" });
   }
 
   async get(id: string): Promise<SandboxInfo | null> {

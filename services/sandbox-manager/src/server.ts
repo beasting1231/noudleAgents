@@ -24,6 +24,8 @@ export async function buildSandboxApp(options: SandboxAppOptions = {}): Promise<
   const views = options.views ?? new ViewAccess(config.viewSecret, config.publicUrl);
 
   await app.register(websocket, { options: { maxPayload: 8 * 1024 * 1024, perMessageDeflate: false } });
+  sandboxes.startIdleMonitor();
+  app.addHook("onClose", async () => sandboxes.stopIdleMonitor());
 
   app.addHook("onRequest", async (request, reply) => {
     if (request.url === "/health" || request.url.startsWith("/view/")) return;
@@ -53,13 +55,23 @@ export async function buildSandboxApp(options: SandboxAppOptions = {}): Promise<
     const body = z
       .object({
         id: z.string().min(1).max(80),
-        workspaceKey: z.string().min(1).max(80),
+        workspaceKey: z.string().min(1).max(320),
         browser: z.boolean().default(false),
         networkAccess: z.boolean().default(false),
       })
       .parse(request.body ?? {});
     const sandbox = await sandboxes.create(body);
     return reply.code(201).send(sandbox);
+  });
+
+  app.post("/v1/sandboxes/:id/start", async (request) => {
+    const params = z.object({ id: z.string().min(1).max(80) }).parse(request.params);
+    return sandboxes.start(params.id);
+  });
+
+  app.post("/v1/sandboxes/:id/stop", async (request) => {
+    const params = z.object({ id: z.string().min(1).max(80) }).parse(request.params);
+    return sandboxes.stop(params.id);
   });
 
   app.post("/v1/sandboxes/:id/exec", async (request) => {

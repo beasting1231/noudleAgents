@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { RelayConfig } from "../config.js";
 import type { RelayRepository } from "../database/repository.js";
 import { conflict, DomainError, notFound } from "../domain/errors.js";
@@ -19,7 +19,7 @@ export interface CreateComputerInput {
 }
 
 export class ComputerService {
-  private readonly agentProvisioning = new Map<string, Promise<ComputerSession>>();
+  private sharedComputerProvisioning: Promise<ComputerSession> | null = null;
 
   constructor(
     private readonly repository: RelayRepository,
@@ -60,19 +60,64 @@ export class ComputerService {
     };
   }
 
+  private normalizeSharedBrowser(session: ComputerSession): ComputerSession {
+    if (!session.browser || session.agentId === null) return session;
+    const userControlled = session.controlMode === "user";
+    return {
+      ...session,
+      agentId: null,
+      taskId: null,
+      controlMode: userControlled ? "user" : "watch",
+      controlHolderId: userControlled ? session.controlHolderId : null,
+      leaseExpiresAt: userControlled ? session.leaseExpiresAt : null,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   private async validateActor(actor: ComputerActor): Promise<void> {
     if (actor.type === "agent") await this.relay.getAgent(actor.id);
   }
 
-  private provisionAgentComputer(agentId: string): Promise<ComputerSession> {
-    const pending = this.agentProvisioning.get(agentId);
-    if (pending) return pending;
+  private provisionSharedComputer(): Promise<ComputerSession> {
+    if (this.sharedComputerProvisioning) return this.sharedComputerProvisioning;
     const provisioning = this.create(
-      { agentId, taskId: null, browser: true, networkAccess: true },
+      { agentId: null, taskId: null, browser: true, networkAccess: true },
       { type: "system", id: this.config.ownerId },
-    ).finally(() => this.agentProvisioning.delete(agentId));
-    this.agentProvisioning.set(agentId, provisioning);
+    ).finally(() => { this.sharedComputerProvisioning = null; });
+    this.sharedComputerProvisioning = provisioning;
     return provisioning;
+  }
+
+  private workspaceKey(input: Pick<CreateComputerInput, "agentId" | "browser">): string {
+    if (input.browser) return "team/computer";
+    return input.agentId
+      ? `${this.config.agentWorkspaceRoot}/${input.agentId}`
+      : `owners/${this.config.ownerId}`;
+  }
+
+  private async wake(session: ComputerSession, actor: ComputerActor): Promise<ComputerSession> {
+    if (session.status === "running") return session;
+    const sandbox = await this.manager.create({
+      id: session.id,
+      workspaceKey: this.workspaceKey(session),
+      browser: session.browser,
+      networkAccess: session.networkAccess,
+    });
+    const awakened = this.withSandbox(session, sandbox);
+    await this.repository.put("computers", awakened);
+    await this.emit(awakened, "resumed_on_demand", actor);
+    return awakened;
+  }
+
+  private async resolveBrowserComputer(id: string | null, actor: ComputerActor): Promise<ComputerSession | null> {
+    const available = await this.list();
+    let session = id
+      ? available.find((candidate) => candidate.id === id) ?? null
+      : available.find((candidate) => candidate.agentId === null && candidate.browser) ?? null;
+    if (!session && actor.type === "agent") session = await this.provisionSharedComputer();
+    const mayWake = actor.type !== "agent" || session?.agentId === null || session?.agentId === actor.id;
+    if (session && session.status === "stopped" && mayWake) session = await this.wake(session, actor);
+    return session;
   }
 
   private async emit(session: ComputerSession, action: string, actor: ComputerActor, extra: Record<string, unknown> = {}): Promise<void> {
@@ -97,24 +142,28 @@ export class ComputerService {
     if (actor.type === "agent" && input.networkAccess) {
       throw new DomainError(403, "network_access_forbidden", "Agents cannot enable sandbox network access directly");
     }
+    if (input.browser) {
+      const existing = (await this.list()).find(
+        (candidate) => candidate.agentId === null && candidate.browser,
+      );
+      if (existing) return existing.status === "stopped" ? this.wake(existing, actor) : existing;
+    }
     const id = `cmp_${randomUUID()}`;
-    const workspaceKey = `ws-${createHash("sha256")
-      .update(`${this.config.workspaceId}:${input.agentId ?? "owner"}:${input.taskId ?? "general"}`)
-      .digest("hex")
-      .slice(0, 32)}`;
+    const effectiveAgentId = input.browser ? null : input.agentId;
+    const workspaceKey = this.workspaceKey({ ...input, agentId: effectiveAgentId });
     const now = new Date().toISOString();
     const initial: ComputerSession = {
       id,
       workspaceId: this.config.workspaceId,
-      agentId: input.agentId,
+      agentId: effectiveAgentId,
       taskId: input.taskId,
       status: "creating",
       browser: input.browser,
       networkAccess: input.networkAccess,
       computerUrl: null,
       computerHostPort: null,
-      controlMode: input.agentId ? "agent" : "watch",
-      controlHolderId: input.agentId,
+      controlMode: effectiveAgentId ? "agent" : "watch",
+      controlHolderId: effectiveAgentId,
       leaseExpiresAt: null,
       createdAt: now,
       updatedAt: now,
@@ -154,10 +203,11 @@ export class ComputerService {
     const byId = new Map(sandboxes.map((sandbox) => [sandbox.id, sandbox]));
     const sessions: ComputerSession[] = [];
     for (const stored of persisted) {
+      const normalized = this.normalizeSharedBrowser(stored);
       const sandbox = byId.get(stored.id);
       const refreshed: ComputerSession = sandbox
-        ? this.withSandbox(stored, sandbox)
-        : { ...stored, status: "stopped", computerUrl: null, computerHostPort: null, updatedAt: new Date().toISOString() };
+        ? this.withSandbox(normalized, sandbox)
+        : { ...normalized, status: "stopped", computerUrl: null, computerHostPort: null, updatedAt: new Date().toISOString() };
       await this.repository.put("computers", refreshed);
       sessions.push(await this.normalizeLease(refreshed));
     }
@@ -167,10 +217,11 @@ export class ComputerService {
   async get(id: string): Promise<ComputerSession> {
     const stored = await this.repository.get("computers", id);
     if (!stored || stored.workspaceId !== this.config.workspaceId) throw notFound("Computer", id);
+    const normalized = this.normalizeSharedBrowser(stored);
     const sandbox = await this.manager.get(id);
     const refreshed: ComputerSession = sandbox
-      ? this.withSandbox(stored, sandbox)
-      : { ...stored, status: "stopped", computerUrl: null, computerHostPort: null, updatedAt: new Date().toISOString() };
+      ? this.withSandbox(normalized, sandbox)
+      : { ...normalized, status: "stopped", computerUrl: null, computerHostPort: null, updatedAt: new Date().toISOString() };
     await this.repository.put("computers", refreshed);
     return this.normalizeLease(refreshed);
   }
@@ -211,7 +262,7 @@ export class ComputerService {
     const session = await this.get(id);
     if (session.status !== "running") throw conflict("computer_not_running", "Computer is not running");
     if (actor.type === "agent") {
-      if (session.agentId !== actor.id) throw new DomainError(403, "computer_agent_mismatch", "Agent is not assigned to this computer");
+      if (session.agentId !== null && session.agentId !== actor.id) throw new DomainError(403, "computer_agent_mismatch", "Agent is not assigned to this computer");
       if (session.controlMode === "user") throw conflict("computer_controlled_by_user", "Computer is currently controlled by the user");
     } else if (
       session.controlMode !== "user" ||
@@ -239,17 +290,11 @@ export class ComputerService {
     if (!["http:", "https:"].includes(parsed.protocol)) {
       throw new DomainError(400, "invalid_browser_url", "Browser navigation requires an http or https URL");
     }
-    const available = await this.list();
-    const session = id
-      ? available.find((candidate) => candidate.id === id)
-      : actor.type === "agent"
-        ? available.find((candidate) => candidate.agentId === actor.id && candidate.browser && candidate.status === "running")
-          ?? await this.provisionAgentComputer(actor.id)
-        : available.find((candidate) => candidate.agentId === null && candidate.browser && candidate.status === "running");
+    const session = await this.resolveBrowserComputer(id, actor);
     if (!session) throw notFound("Running browser computer", id ?? actor.id);
     if (!session.browser || session.status !== "running") throw conflict("computer_browser_unavailable", "Computer browser is not running");
     if (actor.type === "agent") {
-      if (session.agentId !== actor.id) {
+      if (session.agentId !== null && session.agentId !== actor.id) {
         throw new DomainError(403, "computer_agent_mismatch", "Agent cannot control another agent's computer");
       }
       if (session.controlMode === "user") throw conflict("computer_controlled_by_user", "Computer is currently controlled by the user");
@@ -261,17 +306,11 @@ export class ComputerService {
 
   async desktopAction(id: string | null, input: Record<string, unknown>, actor: ComputerActor): Promise<{ computer: ComputerSession; result: DesktopActionResult }> {
     await this.validateActor(actor);
-    const available = await this.list();
-    const session = id
-      ? available.find((candidate) => candidate.id === id)
-      : actor.type === "agent"
-        ? available.find((candidate) => candidate.agentId === actor.id && candidate.browser && candidate.status === "running")
-          ?? await this.provisionAgentComputer(actor.id)
-        : available.find((candidate) => candidate.agentId === null && candidate.browser && candidate.status === "running");
+    const session = await this.resolveBrowserComputer(id, actor);
     if (!session) throw notFound("Running browser computer", id ?? actor.id);
     if (!session.browser || session.status !== "running") throw conflict("computer_browser_unavailable", "Computer desktop is not running");
     if (actor.type === "agent") {
-      if (session.agentId !== actor.id) throw new DomainError(403, "computer_agent_mismatch", "Agent cannot control another agent's computer");
+      if (session.agentId !== null && session.agentId !== actor.id) throw new DomainError(403, "computer_agent_mismatch", "Agent cannot control another agent's computer");
       if (session.controlMode === "user") throw conflict("computer_controlled_by_user", "Computer is currently controlled by the user");
     }
     const result = await this.manager.desktopAction(session.id, input);

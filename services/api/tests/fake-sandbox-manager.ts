@@ -9,12 +9,14 @@ import type {
 export class FakeSandboxManager implements SandboxManagerGateway {
   readonly sandboxes = new Map<string, SandboxInfo>();
   readonly executions: Array<{ id: string; command: string[]; timeoutMs: number }> = [];
+  readonly creations: CreateSandboxInput[] = [];
 
   async list(): Promise<SandboxInfo[]> {
     return [...this.sandboxes.values()].map((sandbox) => structuredClone(sandbox));
   }
 
   async create(input: CreateSandboxInput): Promise<SandboxInfo> {
+    this.creations.push(structuredClone(input));
     const sandbox: SandboxInfo = {
       id: input.id,
       status: "running",
@@ -23,6 +25,22 @@ export class FakeSandboxManager implements SandboxManagerGateway {
     };
     this.sandboxes.set(input.id, sandbox);
     return structuredClone(sandbox);
+  }
+
+  async start(id: string): Promise<SandboxInfo> {
+    const current = this.sandboxes.get(id);
+    if (!current) throw new Error("Sandbox not found");
+    const started = { ...current, status: "running" };
+    this.sandboxes.set(id, started);
+    return structuredClone(started);
+  }
+
+  async stop(id: string): Promise<SandboxInfo> {
+    const current = this.sandboxes.get(id);
+    if (!current) throw new Error("Sandbox not found");
+    const stopped = { ...current, status: "exited" };
+    this.sandboxes.set(id, stopped);
+    return structuredClone(stopped);
   }
 
   async get(id: string): Promise<SandboxInfo | null> {

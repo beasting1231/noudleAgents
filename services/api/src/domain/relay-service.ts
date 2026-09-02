@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   AgentSchema,
   ApprovalSchema,
   ConversationSchema,
   MessageSchema,
   RunSchema,
+  ScheduleSchema,
   TaskBudgetSchema,
   TaskSchema,
   type Agent,
@@ -12,19 +13,23 @@ import {
   type Conversation,
   type CreateAgentInput,
   type CreateConversationInput,
+  type CreateScheduleInput,
   type CreateTaskInput,
   type DelegateTaskInput,
   type Message,
   type RelayEvent,
   type Run,
+  type Schedule,
   type SendMessageInput,
   type Task,
+  type UpdateScheduleInput,
 } from "@noudle-agents/protocol";
 import type { RelayConfig } from "../config.js";
 import type { RelayRepository } from "../database/repository.js";
 import { EventHub } from "../events.js";
 import type { NewEvent, QueueJob, Snapshot } from "../model.js";
 import { seedLocalWorkspace } from "../seed.js";
+import { nextCronOccurrence, normalizeCronExpression, validateTimezone } from "../schedules/cron.js";
 import { conflict, DomainError, notFound } from "./errors.js";
 
 const terminalTaskStatuses = new Set(["completed", "failed", "cancelled"]);
@@ -72,6 +77,11 @@ const forbiddenProfileKey = /(password|passphrase|passcode|pin|otp|two.?factor|2
 
 function normalizedProfileKey(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function parseStoredSchedule(value: unknown): Schedule {
+  const raw = value && typeof value === "object" ? value as Partial<Schedule> : {};
+  return ScheduleSchema.parse({ ...raw, triggerType: raw.triggerType ?? "cron", webhookToken: raw.webhookToken ?? null });
 }
 
 export class RelayService {
@@ -410,6 +420,189 @@ export class RelayService {
     return { message: result.message, runId: result.runId };
   }
 
+  async listSchedules(): Promise<Schedule[]> {
+    return (await this.repository.list("schedules", this.config.workspaceId)).map(parseStoredSchedule);
+  }
+
+  async getSchedule(id: string): Promise<Schedule> {
+    const schedule = await this.repository.get("schedules", id);
+    if (!schedule) throw notFound("Schedule", id);
+    return parseStoredSchedule(schedule);
+  }
+
+  private async scheduleConversation(agentId: string, conversationId?: string): Promise<Conversation> {
+    if (conversationId) {
+      const conversation = await this.getConversation(conversationId);
+      if (!conversation.memberAgentIds.includes(agentId)) {
+        throw new DomainError(400, "agent_not_in_conversation", "Scheduled agent must belong to the selected conversation");
+      }
+      return conversation;
+    }
+    const conversation = (await this.listConversations()).find(
+      (candidate) => candidate.kind === "direct" && candidate.memberAgentIds.length === 1 && candidate.memberAgentIds[0] === agentId,
+    );
+    if (!conversation) throw new DomainError(400, "schedule_conversation_required", "This agent has no direct conversation for scheduled runs");
+    return conversation;
+  }
+
+  async createSchedule(
+    input: CreateScheduleInput,
+    actorType: "user" | "agent" = "user",
+    actorId = this.config.ownerId,
+  ): Promise<Schedule> {
+    const agentId = actorType === "agent" ? actorId : input.agentId;
+    const agent = await this.getAgent(agentId);
+    const conversation = await this.scheduleConversation(agent.id, input.conversationId);
+    const now = new Date();
+    const triggerType = input.triggerType ?? "cron";
+    const cronExpression = normalizeCronExpression(input.cronExpression ?? "0 9 * * *");
+    const timezone = validateTimezone(input.timezone ?? "UTC");
+    const enabled = input.enabled ?? true;
+    const schedule = ScheduleSchema.parse({
+      id: this.id("sch"),
+      workspaceId: this.config.workspaceId,
+      triggerType,
+      agentId: agent.id,
+      conversationId: conversation.id,
+      title: input.title,
+      prompt: input.prompt,
+      cronExpression,
+      timezone,
+      enabled,
+      nextRunAt: enabled && triggerType === "cron" ? nextCronOccurrence(cronExpression, timezone, now) : null,
+      lastRunAt: null,
+      latestRunId: null,
+      webhookToken: triggerType === "webhook" ? randomUUID().replaceAll("-", "") : null,
+      createdByType: actorType,
+      createdById: actorId,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    });
+    await this.repository.put("schedules", schedule);
+    await this.emit(this.newEvent("schedule", schedule.id, "schedule.created", { schedule }, actorType, actorId));
+    return schedule;
+  }
+
+  async updateSchedule(
+    id: string,
+    input: UpdateScheduleInput,
+    actorType: "user" | "agent" = "user",
+    actorId = this.config.ownerId,
+  ): Promise<Schedule> {
+    const current = await this.getSchedule(id);
+    if (actorType === "agent" && (current.agentId !== actorId || (input.agentId !== undefined && input.agentId !== actorId))) {
+      throw new DomainError(403, "schedule_owner_forbidden", "Agents can only configure their own schedules");
+    }
+    const agentId = actorType === "agent" ? actorId : (input.agentId ?? current.agentId);
+    await this.getAgent(agentId);
+    const conversation = await this.scheduleConversation(agentId, input.conversationId ?? (agentId === current.agentId ? current.conversationId : undefined));
+    const triggerType = input.triggerType ?? current.triggerType;
+    const cronExpression = normalizeCronExpression(input.cronExpression ?? current.cronExpression);
+    const timezone = validateTimezone(input.timezone ?? current.timezone);
+    const enabled = input.enabled ?? current.enabled;
+    const now = new Date();
+    const timingChanged = triggerType !== current.triggerType || cronExpression !== current.cronExpression || timezone !== current.timezone || (!current.enabled && enabled);
+    const schedule = ScheduleSchema.parse({
+      ...current,
+      ...input,
+      triggerType,
+      agentId,
+      conversationId: conversation.id,
+      cronExpression,
+      timezone,
+      enabled,
+      nextRunAt: enabled && triggerType === "cron" ? (timingChanged || current.nextRunAt === null ? nextCronOccurrence(cronExpression, timezone, now) : current.nextRunAt) : null,
+      webhookToken: triggerType === "webhook" ? (current.triggerType === "webhook" ? current.webhookToken : randomUUID().replaceAll("-", "")) : null,
+      updatedAt: now.toISOString(),
+    });
+    await this.repository.put("schedules", schedule);
+    await this.emit(this.newEvent("schedule", schedule.id, "schedule.updated", { schedule }, actorType, actorId));
+    return schedule;
+  }
+
+  async deleteSchedule(id: string, actorType: "user" | "agent" = "user", actorId = this.config.ownerId): Promise<void> {
+    const schedule = await this.getSchedule(id);
+    if (actorType === "agent" && schedule.agentId !== actorId) {
+      throw new DomainError(403, "schedule_owner_forbidden", "Agents can only delete their own schedules");
+    }
+    await this.repository.delete("schedules", id);
+    await this.emit(this.newEvent("schedule", id, "schedule.deleted", { scheduleId: id }, actorType, actorId));
+  }
+
+  async triggerSchedule(
+    schedule: Schedule,
+    triggeredAt: string,
+    source: "cron" | "webhook" = "cron",
+    payload?: unknown,
+    operationId = `schedule:${schedule.id}:${triggeredAt}`,
+  ): Promise<{ message: Message; runId: string }> {
+    const now = new Date().toISOString();
+    const payloadText = source === "webhook" && payload !== undefined ? `\n\nWebhook payload:\n${JSON.stringify(payload)}` : "";
+    const message = MessageSchema.parse({
+      id: this.id("msg"),
+      workspaceId: this.config.workspaceId,
+      conversationId: schedule.conversationId,
+      role: "system",
+      authorId: null,
+      content: `${source === "webhook" ? "Webhook-triggered" : "Scheduled"} task: ${schedule.prompt}${payloadText}`,
+      replyToMessageId: null,
+      clientOperationId: operationId,
+      createdAt: now,
+    });
+    const run = RunSchema.parse({
+      id: this.id("run"),
+      workspaceId: this.config.workspaceId,
+      agentId: schedule.agentId,
+      conversationId: schedule.conversationId,
+      taskId: null,
+      triggerMessageId: message.id,
+      status: "queued",
+      codexTurnId: null,
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const job: QueueJob = {
+      id: this.id("job"), workspaceId: this.config.workspaceId, kind: "agent.run",
+      payload: { runId: run.id }, status: "queued", attempts: 0, availableAt: now,
+      lockedAt: null, lockedBy: null, error: null, createdAt: now, updatedAt: now,
+    };
+    const result = await this.repository.commitMessageRun({
+      message, run, job, idempotencyKey: operationId,
+      events: [
+        this.newEvent("message", message.id, "message.created", { message }, "system", null),
+        this.newEvent("run", run.id, "run.created", { run }, "system", null),
+      ],
+    });
+    for (const event of result.events) this.events.publish(event);
+    const nextSchedule = ScheduleSchema.parse({
+      ...schedule,
+      lastRunAt: triggeredAt,
+      latestRunId: result.runId,
+      nextRunAt: schedule.enabled && schedule.triggerType === "cron" ? nextCronOccurrence(schedule.cronExpression, schedule.timezone, new Date()) : null,
+      updatedAt: now,
+    });
+    await this.repository.put("schedules", nextSchedule);
+    await this.emit(this.newEvent("schedule", schedule.id, "schedule.triggered", { schedule: nextSchedule, runId: result.runId, source }, "system", null));
+    const conversation = await this.repository.get("conversations", schedule.conversationId);
+    if (conversation) await this.repository.put("conversations", { ...conversation, lastMessageAt: now, updatedAt: now });
+    return { message: result.message, runId: result.runId };
+  }
+
+  async triggerWebhook(id: string, token: string, payload: unknown): Promise<{ runId: string }> {
+    const schedule = await this.getSchedule(id);
+    if (schedule.triggerType !== "webhook" || !schedule.webhookToken) throw notFound("Webhook", id);
+    const expected = Buffer.from(schedule.webhookToken);
+    const received = Buffer.from(token);
+    if (expected.length !== received.length || !timingSafeEqual(expected, received)) throw notFound("Webhook", id);
+    if (!schedule.enabled) throw conflict("webhook_disabled", "This webhook job is paused");
+    const triggeredAt = new Date().toISOString();
+    const result = await this.triggerSchedule(schedule, triggeredAt, "webhook", payload, `webhook:${schedule.id}:${randomUUID()}`);
+    return { runId: result.runId };
+  }
+
   listTasks(): Promise<Task[]> {
     return this.repository.list("tasks", this.config.workspaceId);
   }
@@ -584,6 +777,132 @@ export class RelayService {
       ),
     );
     return message;
+  }
+
+  async requestAgentHelp(
+    senderAgentId: string,
+    targetAgentId: string,
+    parentTaskId: string,
+    request: string,
+    paths: string[],
+  ): Promise<{ task: Task; requestMessage: Message; runId: string }> {
+    const [sender, target, parent] = await Promise.all([
+      this.getAgent(senderAgentId),
+      this.getAgent(targetAgentId),
+      this.getTask(parentTaskId),
+    ]);
+    if (sender.id === target.id) throw new DomainError(400, "same_agent_request", "An agent cannot request help from itself");
+
+    let task = await this.createTask(
+      {
+        title: `Help ${sender.name}: ${request}`.slice(0, 180),
+        objective: request,
+        acceptanceCriteria: [
+          "Return a concise answer to the requesting agent",
+          "Include exact /workspace paths for every shared file",
+          "Preserve existing files unless the request explicitly asks for changes",
+        ],
+        parentTaskId: parent.id,
+        ownerAgentId: target.id,
+        priority: parent.priority,
+        budget: {
+          maxTokens: Math.max(1, Math.floor(parent.budget.maxTokens / 2)),
+          maxWallSeconds: parent.budget.maxWallSeconds,
+          maxChildTasks: Math.max(0, parent.budget.maxChildTasks - 1),
+        },
+      },
+      "agent",
+      sender.id,
+    );
+    const conversation = await this.createConversation(
+      {
+        kind: "task",
+        title: task.title,
+        memberAgentIds: [sender.id, target.id],
+        taskId: task.id,
+      },
+      "agent",
+      sender.id,
+    );
+    task = await this.updateTask(task.id, { conversationId: conversation.id }, "agent", sender.id);
+
+    const now = new Date().toISOString();
+    const pathContext = paths.length > 0
+      ? `\n\nRelevant shared paths:\n${paths.map((filePath) => `- ${filePath}`).join("\n")}`
+      : "";
+    const requestMessage = MessageSchema.parse({
+      id: this.id("msg"),
+      workspaceId: this.config.workspaceId,
+      conversationId: conversation.id,
+      role: "agent",
+      authorId: sender.id,
+      content: `Teammate request from ${sender.name} (${sender.id}):\n\n${request}${pathContext}\n\nThe team shares /workspace. Inspect the relevant project and agent directories, then respond with your findings and exact paths to any files the requester should use.`,
+      replyToMessageId: null,
+      clientOperationId: null,
+      createdAt: now,
+    });
+    const run = RunSchema.parse({
+      id: this.id("run"),
+      workspaceId: this.config.workspaceId,
+      agentId: target.id,
+      conversationId: conversation.id,
+      taskId: task.id,
+      triggerMessageId: requestMessage.id,
+      status: "queued",
+      codexTurnId: null,
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const job: QueueJob = {
+      id: this.id("job"),
+      workspaceId: this.config.workspaceId,
+      kind: "agent.run",
+      payload: { runId: run.id },
+      status: "queued",
+      attempts: 0,
+      availableAt: now,
+      lockedAt: null,
+      lockedBy: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const committed = await this.repository.commitMessageRun({
+      message: requestMessage,
+      run,
+      job,
+      idempotencyKey: `agent-help:${requestMessage.id}`,
+      events: [
+        this.newEvent("message", requestMessage.id, "message.created", { message: requestMessage, taskId: task.id, targetAgentId: target.id, paths }, "agent", sender.id),
+        this.newEvent("run", run.id, "run.created", { run, requestedByAgentId: sender.id }, "agent", sender.id),
+      ],
+    });
+    for (const event of committed.events) this.events.publish(event);
+    await this.repository.put("conversations", { ...conversation, lastMessageAt: now, updatedAt: now });
+    return { task, requestMessage, runId: committed.runId };
+  }
+
+  async readAgentHelp(
+    actorAgentId: string,
+    taskId: string,
+  ): Promise<{ task: Task; runs: Run[]; messages: Message[] }> {
+    await this.getAgent(actorAgentId);
+    const task = await this.getTask(taskId);
+    if (!task.conversationId) {
+      throw new DomainError(400, "help_conversation_missing", "This task is not linked to an agent help conversation");
+    }
+    const conversation = await this.getConversation(task.conversationId);
+    if (!conversation.memberAgentIds.includes(actorAgentId)) {
+      throw new DomainError(403, "help_request_forbidden", "Agent is not a member of this help request");
+    }
+    const [runs, messages] = await Promise.all([
+      this.listRuns().then((items) => items.filter((run) => run.taskId === task.id)),
+      this.listMessages(conversation.id),
+    ]);
+    return { task, runs, messages };
   }
 
   async blockTask(id: string, blocker: string, needsUser: boolean, actorAgentId: string): Promise<Task> {

@@ -216,55 +216,7 @@ export function useRelay() {
     };
     dispatch({ type: "upsert_message", message: userMessage });
 
-    const agent = state.agents.find(({ id }) => id === agentId);
-    const runId = `run-${crypto.randomUUID()}`;
-    const run: Run = {
-      id: runId,
-      workspaceId: "workspace_local",
-      agentId,
-      conversationId,
-      taskId: null,
-      triggerMessageId: userMessage.id,
-      status: "running",
-      codexTurnId: null,
-      error: null,
-      startedAt: createdAt,
-      completedAt: null,
-      createdAt,
-      updatedAt: createdAt,
-    };
-    setRuns((current) => upsertRun(current, run));
-    if (agent) dispatch({ type: "upsert_agent", agent: { ...agent, status: "working", updatedAt: createdAt } });
-    const answer = `I’ve got it. I’ll treat “${content.slice(0, 74)}${content.length > 74 ? "…" : ""}” as the active objective. I’ll map the work, delegate any bounded specialist tasks, and keep risky actions behind approval.`;
-    const responseId = `message-${crypto.randomUUID()}`;
-    const chunks = answer.match(/.{1,10}/g) ?? [answer];
-    let rendered = "";
-    chunks.forEach((chunk, index) => {
-      const timer = window.setTimeout(() => {
-        rendered += chunk;
-        const message: Message = {
-          id: responseId,
-          workspaceId: "workspace_local",
-          conversationId,
-          role: "agent",
-          authorId: agentId,
-          content: rendered,
-          replyToMessageId: userMessage.id,
-          clientOperationId: null,
-          createdAt: new Date(Date.now() + 500).toISOString(),
-        };
-        dispatch({ type: "upsert_message", message });
-        if (index === chunks.length - 1) {
-          const completedAt = new Date().toISOString();
-          setRuns((current) => current.map((candidate) => candidate.id === runId
-            ? { ...candidate, status: "completed", completedAt, updatedAt: completedAt }
-            : candidate));
-          if (agent) dispatch({ type: "upsert_agent", agent: { ...agent, status: "idle", updatedAt: completedAt } });
-        }
-      }, 380 + index * 48);
-      streamTimers.current.push(timer);
-    });
-  }, [client, state.agents]);
+  }, [client]);
 
   const clearConversation = useCallback(async (conversation: Conversation): Promise<Conversation> => {
     streamTimers.current.forEach(window.clearTimeout);

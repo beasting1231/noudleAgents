@@ -1,4 +1,4 @@
-import type { Agent, Approval, ConnectorProvider, Conversation, Message, RelayEvent, Run, Task } from "@noudle-agents/protocol";
+import type { Agent, Approval, ConnectorAuthType, Conversation, Message, RelayEvent, Run, Schedule, Task } from "@noudle-agents/protocol";
 
 export interface Workspace {
   id: string;
@@ -65,15 +65,23 @@ export interface ComputerSession {
 export interface ConnectorRecord {
   id: string;
   workspaceId: string;
-  provider: ConnectorProvider;
+  provider: string;
+  kind: "builtin" | "custom";
+  name: string;
+  baseUrl: string | null;
+  authType: ConnectorAuthType;
+  headerName: string | null;
+  authPrefix: string;
   accountLabel: string;
   encryptedSecret: string;
+  createdByType: "user" | "agent";
+  createdById: string;
   connectedAt: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type EntityKind = "agents" | "conversations" | "messages" | "tasks" | "runs" | "approvals" | "artifacts" | "computers" | "connectors";
+export type EntityKind = "agents" | "conversations" | "messages" | "tasks" | "runs" | "approvals" | "artifacts" | "computers" | "connectors" | "schedules";
 export interface EntityMap {
   agents: Agent;
   conversations: Conversation;
@@ -84,6 +92,7 @@ export interface EntityMap {
   artifacts: ArtifactRecord;
   computers: ComputerSession;
   connectors: ConnectorRecord;
+  schedules: Schedule;
 }
 
 export type NewEvent = Omit<RelayEvent, "id" | "cursor" | "sequence" | "createdAt">;

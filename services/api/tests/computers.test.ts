@@ -32,11 +32,11 @@ describe("computer session APIs", () => {
     expect(createdResponse.statusCode).toBe(201);
     const created = createdResponse.json() as ComputerSession & Record<string, unknown>;
     expect(created).toMatchObject({
-      agentId: "agent-builder",
+      agentId: null,
       status: "running",
       browser: true,
-      controlMode: "agent",
-      controlHolderId: "agent-builder",
+      controlMode: "watch",
+      controlHolderId: null,
       computerHostPort: 61234,
     });
     expect(created.computerUrl).toContain("192.168.20.10:61234");
@@ -132,7 +132,7 @@ describe("computer session APIs", () => {
     expect(foreign.statusCode).toBe(403);
   });
 
-  it("automatically gives each agent a persistent independent browser", async () => {
+  it("automatically gives every agent the same persistent workspace browser", async () => {
     const shared = (
       await context.app.inject({
         method: "POST",
@@ -149,17 +149,17 @@ describe("computer session APIs", () => {
     });
     expect(response.statusCode).toBe(200);
     const builderComputer = response.json().computer as ComputerSession;
-    expect(builderComputer).toMatchObject({ agentId: "agent-builder", networkAccess: true, controlMode: "agent" });
-    expect(builderComputer.id).not.toBe(shared.id);
+    expect(builderComputer).toMatchObject({ agentId: null, networkAccess: true, controlMode: "watch" });
+    expect(builderComputer.id).toBe(shared.id);
+    expect(manager.creations.find((input) => input.id === builderComputer.id)?.workspaceKey).toBe("team/computer");
 
-    const sharedDenied = await context.app.inject({
+    const sharedScreenshot = await context.app.inject({
       method: "POST",
       url: "/v1/computers/desktop/action",
       headers: { ...authHeaders, "x-relay-agent-id": "agent-builder" },
       payload: { action: "screenshot", computerId: shared.id },
     });
-    expect(sharedDenied.statusCode).toBe(403);
-    expect(sharedDenied.json().error.code).toBe("computer_agent_mismatch");
+    expect(sharedScreenshot.statusCode).toBe(200);
 
     const reused = await context.app.inject({
       method: "POST",
@@ -169,20 +169,66 @@ describe("computer session APIs", () => {
     });
     expect(reused.json().computer.id).toBe(builderComputer.id);
 
+    const duplicateCreate = await context.app.inject({
+      method: "POST",
+      url: "/v1/computers",
+      headers: authHeaders,
+      payload: { agentId: "agent-builder", browser: true, networkAccess: true },
+    });
+    expect(duplicateCreate.statusCode).toBe(201);
+    expect(duplicateCreate.json().id).toBe(builderComputer.id);
+
+    await manager.stop(builderComputer.id);
+    const resumed = await context.app.inject({
+      method: "POST",
+      url: "/v1/computers/desktop/action",
+      headers: { ...authHeaders, "x-relay-agent-id": "agent-builder" },
+      payload: { action: "screenshot" },
+    });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json().computer).toMatchObject({ id: builderComputer.id, status: "running" });
+
     const researcher = await context.app.inject({
       method: "POST",
       url: "/v1/computers/desktop/action",
       headers: { ...authHeaders, "x-relay-agent-id": "agent-researcher" },
       payload: { action: "screenshot" },
     });
-    expect(researcher.json().computer).toMatchObject({ agentId: "agent-researcher", controlMode: "agent" });
-    expect(researcher.json().computer.id).not.toBe(builderComputer.id);
-    expect(manager.sandboxes.size).toBe(3);
+    expect(researcher.json().computer).toMatchObject({ id: builderComputer.id, agentId: null, controlMode: "watch" });
+    expect(manager.sandboxes.size).toBe(1);
     const events = await context.repository.listEvents("workspace-test", 0);
     expect(events.some((event) => event.payload.action === "browser_navigated" && event.payload.url === "https://www.reddit.com/")).toBe(true);
   });
 
-  it("lets an agent operate its own desktop while respecting user takeover", async () => {
+  it("migrates legacy agent-assigned browsers into the shared computer", async () => {
+    const created = (
+      await context.app.inject({
+        method: "POST",
+        url: "/v1/computers",
+        headers: authHeaders,
+        payload: { browser: true, networkAccess: true },
+      })
+    ).json() as ComputerSession;
+    await context.repository.put("computers", {
+      ...created,
+      agentId: "agent-builder",
+      taskId: "task-legacy",
+      controlMode: "agent",
+      controlHolderId: "agent-builder",
+    });
+
+    const listed = await context.app.inject({ method: "GET", url: "/v1/computers", headers: authHeaders });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()[0]).toMatchObject({
+      id: created.id,
+      agentId: null,
+      taskId: null,
+      controlMode: "watch",
+      controlHolderId: null,
+    });
+  });
+
+  it("lets an agent operate the shared desktop while respecting user takeover", async () => {
     const screenshot = await context.app.inject({
       method: "POST",
       url: "/v1/computers/desktop/action",
@@ -191,7 +237,7 @@ describe("computer session APIs", () => {
     });
     expect(screenshot.statusCode).toBe(200);
     const computer = screenshot.json().computer as ComputerSession;
-    expect(computer).toMatchObject({ agentId: "agent-builder", controlMode: "agent" });
+    expect(computer).toMatchObject({ agentId: null, controlMode: "watch" });
     expect(screenshot.json()).toMatchObject({ result: { action: "screenshot", width: 1440, height: 900, mimeType: "image/jpeg" } });
 
     await context.app.inject({ method: "POST", url: `/v1/computers/${computer.id}/takeover`, headers: authHeaders, payload: { leaseSeconds: 60 } });

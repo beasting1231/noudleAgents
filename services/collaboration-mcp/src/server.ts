@@ -16,6 +16,13 @@ function result(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], structuredContent: { data } };
 }
 
+function withWebhookUrl(data: unknown) {
+  const schedule = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const id = typeof schedule.id === "string" ? schedule.id : "";
+  const token = typeof schedule.webhookToken === "string" ? schedule.webhookToken : "";
+  return { ...schedule, webhookUrl: id && token ? `${apiUrl.replace(/\/$/, "")}/v1/webhooks/${encodeURIComponent(id)}/${encodeURIComponent(token)}` : null };
+}
+
 interface DesktopResponse {
   computer: { id: string; controlMode: string };
   result: { action: string; width: number; height: number; mimeType: "image/jpeg"; image: string };
@@ -74,6 +81,16 @@ server.registerTool(
 );
 
 server.registerTool(
+  "list_connectors",
+  {
+    title: "List shared connectors",
+    description: "List every workspace connector available to all agents. Raw credentials are never returned.",
+    inputSchema: {},
+  },
+  async () => result(await client.request("/v1/connectors")),
+);
+
+server.registerTool(
   "connect_connector",
   {
     title: "Connect a service",
@@ -87,6 +104,55 @@ server.registerTool(
     method: "PUT",
     body: JSON.stringify({ secret }),
   })),
+);
+
+server.registerTool(
+  "create_connector",
+  {
+    title: "Create a shared API connector",
+    description: "Create a workspace-wide connector for an HTTPS API when the user supplies its credential and asks to connect it. Every agent can use the connector, but no agent can retrieve the raw secret. Never repeat or save the secret anywhere else.",
+    inputSchema: {
+      name: z.string().min(1).max(100),
+      baseUrl: z.string().url().max(2000),
+      authType: z.enum(["bearer", "header", "basic"]).default("bearer"),
+      headerName: z.string().min(1).max(100).nullable().default(null),
+      authPrefix: z.string().max(100).default(""),
+      secret: z.string().min(1).max(10_000),
+    },
+  },
+  async (input) => result(await client.request("/v1/connectors", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })),
+);
+
+server.registerTool(
+  "connector_request",
+  {
+    title: "Use a shared API connector",
+    description: "Call an API through a workspace connector. The server injects the encrypted credential without revealing it. Paths must remain under the connector's configured HTTPS base URL.",
+    inputSchema: {
+      connectorId: z.string().min(1).max(160),
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("GET"),
+      path: z.string().min(1).max(4000),
+      headers: z.record(z.string().min(1).max(100), z.string().max(4000)).default({}),
+      body: z.string().max(2_000_000).nullable().default(null),
+    },
+  },
+  async ({ connectorId, ...input }) => result(await client.request(`/v1/connectors/${encodeURIComponent(connectorId)}/request`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  })),
+);
+
+server.registerTool(
+  "delete_connector",
+  {
+    title: "Delete a shared connector",
+    description: "Delete a custom workspace connector only when the user explicitly asks. This removes it for every agent.",
+    inputSchema: { connectorId: z.string().min(1).max(160) },
+  },
+  async ({ connectorId }) => result(await client.request(`/v1/connectors/${encodeURIComponent(connectorId)}`, { method: "DELETE" })),
 );
 
 server.registerTool(
@@ -128,7 +194,7 @@ server.registerTool(
   "list_computers",
   {
     title: "List noudleAgents computers",
-    description: "List running noudleAgents computer sessions. Use this before computer work to see which browser is assigned to you or available as the shared unassigned computer.",
+    description: "List current noudleAgents computer sessions. The visible browser is shared by the team. Treat the returned controlMode as authoritative: 'watch' permits agent actions, while 'user' means the owner currently has control.",
     inputSchema: {},
   },
   async () => result(await client.request("/v1/computers")),
@@ -138,7 +204,7 @@ server.registerTool(
   "browser_navigate",
   {
     title: "Navigate the noudleAgents browser",
-    description: "Open an http or https URL in the visible noudleAgents VM browser. Use this for requests such as 'open Reddit on your computer'; do not use local desktop launchers such as xdg-open or open.",
+    description: "Open an http or https URL in the shared visible noudleAgents VM browser. This call checks control live; retry it when the user says control was returned instead of relying on an earlier blocked attempt. If it succeeds, the agent has control and must not report a control blocker. Do not use local desktop launchers such as xdg-open or open.",
     inputSchema: {
       url: z.string().url().max(8_000),
       computerId: z.string().min(1).max(160).nullable().default(null),
@@ -154,7 +220,7 @@ server.registerTool(
   "computer_screenshot",
   {
     title: "Look at the noudleAgents computer",
-    description: "Capture the complete visible noudleAgents VM desktop. Always use this before interacting and whenever the screen may have changed. Coordinates in the returned image map directly to the mouse tools.",
+    description: "Capture the complete shared noudleAgents VM desktop and return its current computer record. Always use this before interacting or after control may have changed. Treat this latest result as authoritative rather than repeating a control state from an earlier turn. Coordinates in the returned image map directly to the mouse tools.",
     inputSchema: { computerId: z.string().min(1).max(160).nullable().default(null) },
   },
   async ({ computerId }) => desktopAction({ action: "screenshot", computerId }),
@@ -262,6 +328,86 @@ server.registerTool(
 );
 
 server.registerTool(
+  "list_schedules",
+  {
+    title: "List scheduled jobs",
+    description: "List scheduled and webhook-triggered jobs configured for this agent, including their trigger type and enabled state.",
+    inputSchema: {},
+  },
+  async () => result(await client.request("/v1/schedules")),
+);
+
+server.registerTool(
+  "create_schedule",
+  {
+    title: "Create a recurring scheduled job",
+    description: "Create a recurring job when the user asks you to do something on a schedule. Convert their natural-language timing into a standard five-field cron expression (minute hour day-of-month month day-of-week), preserve their requested timezone, and put the actual future instruction in prompt. Examples: every 5 minutes is */5 * * * *; daily at 09:00 is 0 9 * * *; Wednesday and Saturday at 10:30 is 30 10 * * 3,6.",
+    inputSchema: {
+      title: z.string().min(1).max(160),
+      prompt: z.string().min(1).max(200_000),
+      cronExpression: z.string().min(9).max(120),
+      timezone: z.string().min(1).max(120).default("UTC"),
+      enabled: z.boolean().default(true),
+    },
+  },
+  async (input) => result(await client.request("/v1/schedules", {
+    method: "POST",
+    body: JSON.stringify({ ...input, triggerType: "cron", agentId }),
+  })),
+);
+
+server.registerTool(
+  "create_webhook_job",
+  {
+    title: "Create a webhook-triggered job",
+    description: "Create an automation that runs this agent whenever its private webhook URL receives a POST. Use this when the user asks for a webhook trigger rather than a time schedule. Return the generated webhookUrl to the user and tell them it accepts JSON POST bodies. Treat the URL as a private secret.",
+    inputSchema: {
+      title: z.string().min(1).max(160),
+      prompt: z.string().min(1).max(200_000),
+      enabled: z.boolean().default(true),
+    },
+  },
+  async (input) => {
+    const schedule = await client.request("/v1/schedules", {
+      method: "POST",
+      body: JSON.stringify({ ...input, triggerType: "webhook", agentId }),
+    });
+    return result(withWebhookUrl(schedule));
+  },
+);
+
+server.registerTool(
+  "update_schedule",
+  {
+    title: "Configure a scheduled job",
+    description: "Change this agent's recurring job, including its instruction, cron timing, timezone, or enabled state. Only include fields the user asked to change.",
+    inputSchema: {
+      scheduleId: z.string().min(1).max(160),
+      triggerType: z.enum(["cron", "webhook"]).optional(),
+      title: z.string().min(1).max(160).optional(),
+      prompt: z.string().min(1).max(200_000).optional(),
+      cronExpression: z.string().min(9).max(120).optional(),
+      timezone: z.string().min(1).max(120).optional(),
+      enabled: z.boolean().optional(),
+    },
+  },
+  async ({ scheduleId, ...input }) => result(await client.request(`/v1/schedules/${encodeURIComponent(scheduleId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  })),
+);
+
+server.registerTool(
+  "delete_schedule",
+  {
+    title: "Delete a scheduled job",
+    description: "Permanently delete one of this agent's recurring jobs only when the user explicitly asks to remove it.",
+    inputSchema: { scheduleId: z.string().min(1).max(160) },
+  },
+  async ({ scheduleId }) => result(await client.request(`/v1/schedules/${encodeURIComponent(scheduleId)}`, { method: "DELETE" })),
+);
+
+server.registerTool(
   "read_task",
   {
     title: "Read a noudleAgents task",
@@ -338,6 +484,34 @@ server.registerTool(
     method: "POST",
     body: JSON.stringify(input),
   })),
+);
+
+server.registerTool(
+  "request_agent_help",
+  {
+    title: "Request information or files from a teammate",
+    description: "Create a task-linked request and wake another agent to provide context, findings, or files. Use this when another agent's work or explanation is needed. The team shares /workspace, so include exact relevant paths and ask the teammate to return exact paths in the handoff. Use read_agent_help with the returned task id to retrieve its response.",
+    inputSchema: {
+      agentId: z.string().min(1),
+      taskId: z.string().min(1),
+      request: z.string().min(1).max(20_000),
+      paths: z.array(z.string().min(1).max(1000)).max(50).default([]),
+    },
+  },
+  async (input) => result(await client.request("/v1/collaboration/requests", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })),
+);
+
+server.registerTool(
+  "read_agent_help",
+  {
+    title: "Read a teammate's response",
+    description: "Read the current status, response messages, and exact shared file paths from an earlier request_agent_help call.",
+    inputSchema: { taskId: z.string().min(1) },
+  },
+  async ({ taskId }) => result(await client.request(`/v1/collaboration/requests/${encodeURIComponent(taskId)}`)),
 );
 
 server.registerTool(

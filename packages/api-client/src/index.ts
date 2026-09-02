@@ -3,15 +3,19 @@ import type {
   Approval,
   Conversation,
   ConnectorProvider,
+  CreateCustomConnectorInput,
   ConnectorSummary,
   CreateAgentInput,
   CreateConversationInput,
+  CreateScheduleInput,
   CreateTaskInput,
   Message,
   RelayEvent,
   Run,
+  Schedule,
   SendMessageInput,
   Task,
+  UpdateScheduleInput,
 } from "@noudle-agents/protocol";
 
 export interface RelaySnapshot {
@@ -92,6 +96,14 @@ export class RelayApiClient {
     return this.request(`/v1/connectors/${encodeURIComponent(provider)}`, { method: "DELETE" });
   }
 
+  createConnector(input: CreateCustomConnectorInput): Promise<ConnectorSummary> {
+    return this.request("/v1/connectors", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  deleteConnector(id: string): Promise<void> {
+    return this.request(`/v1/connectors/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
   listMessages(conversationId: string): Promise<Message[]> {
     return this.request(`/v1/conversations/${encodeURIComponent(conversationId)}/messages`);
   }
@@ -110,6 +122,22 @@ export class RelayApiClient {
 
   listRuns(): Promise<Run[]> {
     return this.request("/v1/runs");
+  }
+
+  listSchedules(): Promise<Schedule[]> {
+    return this.request("/v1/schedules");
+  }
+
+  createSchedule(input: CreateScheduleInput): Promise<Schedule> {
+    return this.request("/v1/schedules", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateSchedule(id: string, input: UpdateScheduleInput): Promise<Schedule> {
+    return this.request(`/v1/schedules/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  deleteSchedule(id: string): Promise<void> {
+    return this.request(`/v1/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   createTask(input: CreateTaskInput): Promise<Task> {

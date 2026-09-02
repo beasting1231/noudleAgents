@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: relay
-      POSTGRES_PASSWORD: relay
+      POSTGRES_PASSWORD: ${RELAY_POSTGRES_PASSWORD:-relay}
       POSTGRES_DB: relay
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
@@ -31,7 +31,7 @@ services:
       NODE_ENV: production
       RELAY_HOST: 0.0.0.0
       RELAY_PORT: 4310
-      RELAY_DATABASE_URL: postgres://relay:relay@postgres:5432/relay
+      RELAY_DATABASE_URL: postgres://relay:${RELAY_POSTGRES_PASSWORD:-relay}@postgres:5432/relay
       RELAY_DEV_AUTH_TOKEN: ${RELAY_DEV_AUTH_TOKEN:-relay-local-owner}
       RELAY_AGENT_API_TOKEN: ${RELAY_AGENT_API_TOKEN:-relay-local-agent-token}
       RELAY_CODEX_WORKER_URL: http://codex-worker:4320
@@ -84,6 +84,7 @@ services:
       RELAY_DOCKER_ISOLATED_NETWORK: relay-runtime-isolated
       RELAY_SANDBOX_PUBLIC_URL: http://127.0.0.1:4330
       RELAY_SANDBOX_VIEW_SECRET: ${RELAY_SANDBOX_VIEW_SECRET:-relay-local-view-secret}
+      RELAY_SANDBOX_IDLE_MINUTES: ${RELAY_SANDBOX_IDLE_MINUTES:-30}
     ports:
       - "127.0.0.1:4330:4330"
     volumes:

@@ -1,0 +1,26 @@
+services:
+  api:
+    environment:
+      RELAY_MAX_CONCURRENT_RUNS: ${RELAY_MAX_CONCURRENT_RUNS:-4}
+
+  sandbox-manager:
+    environment:
+      RELAY_SANDBOX_PUBLIC_URL: https://${RELAY_PUBLIC_HOST:-srv1949960.hstgr.cloud}
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - sandbox-manager
+    network_mode: host
+    environment:
+      RELAY_PUBLIC_HOST: ${RELAY_PUBLIC_HOST:-srv1949960.hstgr.cloud}
+    volumes:
+      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - relay-caddy-data:/data
+      - relay-caddy-config:/config
+
+volumes:
+  relay-caddy-data:
+  relay-caddy-config:

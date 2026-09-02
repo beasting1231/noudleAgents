@@ -18,7 +18,8 @@ Desktop and iPhone are clients of the same server. Chats, agents, tasks, run sta
 - Electron desktop app with chat, agents, tasks, approvals, context panel, and command palette
 - React Native iPhone app with chats, tasks, approvals, library/settings, and secure token storage
 - Versioned file upload, download, rename, checksum, provenance, and persistent artifact storage
-- Live computer sessions with noVNC watch, five-minute takeover leases, return-to-agent, and audited terminal execution
+- One on-demand workspace computer with global browser and CLI logins, idle suspension, noVNC watch, five-minute takeover leases, and audited per-agent actions
+- Workspace-wide encrypted API connectors that agents can create and use without exposing raw credentials
 - HMAC-capability noVNC reverse proxy with no sandbox ports exposed on the host
 - Hardened non-root Linux agent containers with terminal, Chromium, Playwright, Xvfb, and noVNC
 - Seeded demo mode in both clients when no server is reachable
@@ -37,6 +38,10 @@ React Native iOS ─┘                     │
 ```
 
 The API is the only product-state authority. Codex credentials stay inside the trusted worker. The sandbox manager is the only service with Docker access; spawned agent containers do not receive the Docker socket or Codex credentials. Browser containers sit on an internal no-egress network and expose no host ports; the manager relays noVNC HTTP/WebSocket traffic through a signed, session-specific capability URL.
+
+The agents are a trusted team on one shared computer. Its persistent home directory and Chromium profile use global Docker volumes, and its working directory is `/workspace/team/computer`, so a browser login, CLI login, SSH configuration, or other credential established by one agent is available to every agent. Browser and desktop actions are serialized and audited under the calling agent. Shared project files live in `/workspace/projects`, agent working directories remain under `/workspace/agents/<agent-id>`, and shared notes/data live in `/workspace/team`. A structured help request creates a child task, wakes the target agent, carries exact shared paths, and lets the requester read back the response.
+
+Connectors are shared at workspace scope. GitHub, Resend, Notion, and Stripe have verified built-in connection flows; agents can also create custom HTTPS API connectors. Credentials are encrypted in PostgreSQL and injected only by the API's connector request broker. Agent tools and UI responses receive connector metadata, never the raw credential. Custom requests cannot change origin, override authentication headers, follow redirects, or target direct local/private addresses.
 
 ## Prerequisites
 

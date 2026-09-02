@@ -41,4 +41,6 @@ export interface RelayRepository {
   claim(workspaceId: string, workerId: string, kinds: string[]): Promise<QueueJob | null>;
   completeJob(id: string): Promise<void>;
   failJob(id: string, error: string, retryAt: string | null): Promise<void>;
+  claimDueSchedule(workspaceId: string, workerId: string, now: string): Promise<EntityMap["schedules"] | null>;
+  releaseScheduleClaim(id: string): Promise<void>;
 }

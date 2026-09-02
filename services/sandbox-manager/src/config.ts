@@ -14,6 +14,7 @@ const raw = z.object({
   RELAY_SANDBOX_MEMORY_MB: z.coerce.number().int().min(256).max(16_384).default(2048),
   RELAY_SANDBOX_CPUS: z.coerce.number().min(0.25).max(16).default(1.5),
   RELAY_SANDBOX_PIDS: z.coerce.number().int().min(128).max(4096).default(768),
+  RELAY_SANDBOX_IDLE_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
 }).parse(process.env);
 
 export const config = {
@@ -29,4 +30,5 @@ export const config = {
   memoryBytes: raw.RELAY_SANDBOX_MEMORY_MB * 1024 * 1024,
   nanoCpus: Math.round(raw.RELAY_SANDBOX_CPUS * 1_000_000_000),
   pidsLimit: raw.RELAY_SANDBOX_PIDS,
+  idleMilliseconds: raw.RELAY_SANDBOX_IDLE_MINUTES * 60 * 1000,
 };

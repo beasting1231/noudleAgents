@@ -27,6 +27,13 @@
       rfb.viewOnly = false;
       rfb.focusOnClick = true;
 
+      window.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        window.parent.postMessage({ type: "relay-computer-escape" }, "*");
+      }, true);
+
       window.addEventListener("paste", (event) => {
         const text = event.clipboardData?.getData("text/plain");
         if (!text) return;

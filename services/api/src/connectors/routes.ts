@@ -1,9 +1,10 @@
 import type { FastifyInstance } from "fastify";
-import { ConnectorProviderSchema } from "@noudle-agents/protocol";
+import { ConnectorProviderSchema, ConnectorRequestInputSchema, CreateCustomConnectorInputSchema } from "@noudle-agents/protocol";
 import { z } from "zod";
 import type { ConnectorService } from "./connector-service.js";
 
-const ParamsSchema = z.object({ provider: ConnectorProviderSchema });
+const ProviderParamsSchema = z.object({ provider: ConnectorProviderSchema });
+const IdParamsSchema = z.object({ id: z.string().min(1).max(160) });
 const ConnectSchema = z.object({ secret: z.string().min(1).max(10_000) }).strict();
 
 function agentActor(request: { headers: Record<string, string | string[] | undefined> }): string | null {
@@ -14,14 +15,32 @@ function agentActor(request: { headers: Record<string, string | string[] | undef
 
 export function registerConnectorRoutes(app: FastifyInstance, connectors: ConnectorService, ownerId: string): void {
   app.get("/v1/connectors", () => connectors.list());
+  app.post("/v1/connectors", async (request, reply) => {
+    const actorId = agentActor(request);
+    const connector = await connectors.createCustom(
+      CreateCustomConnectorInputSchema.parse(request.body),
+      actorId ? "agent" : "user",
+      actorId ?? ownerId,
+    );
+    return reply.code(201).send(connector);
+  });
   app.put("/v1/connectors/:provider", (request) => {
-    const { provider } = ParamsSchema.parse(request.params);
+    const { provider } = ProviderParamsSchema.parse(request.params);
     const actorId = agentActor(request);
     return connectors.connect(provider, ConnectSchema.parse(request.body).secret, actorId ? "agent" : "user", actorId ?? ownerId);
   });
-  app.delete("/v1/connectors/:provider", async (request, reply) => {
+  app.post("/v1/connectors/:id/request", (request) => {
     const actorId = agentActor(request);
-    await connectors.disconnect(ParamsSchema.parse(request.params).provider, actorId ? "agent" : "user", actorId ?? ownerId);
+    return connectors.request(
+      IdParamsSchema.parse(request.params).id,
+      ConnectorRequestInputSchema.parse(request.body),
+      actorId ? "agent" : "user",
+      actorId ?? ownerId,
+    );
+  });
+  app.delete("/v1/connectors/:id", async (request, reply) => {
+    const actorId = agentActor(request);
+    await connectors.disconnect(IdParamsSchema.parse(request.params).id, actorId ? "agent" : "user", actorId ?? ownerId);
     return reply.code(204).send();
   });
 }
