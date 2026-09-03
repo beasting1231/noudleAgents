@@ -7,7 +7,6 @@
     "version": "0.1.0",
     "orientation": "default",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.bastingsolutions.noudleagents",
@@ -25,6 +24,13 @@
     "plugins": [
       "expo-secure-store",
       "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow noudleAgents to attach photos to agent chats.",
+          "cameraPermission": "Allow noudleAgents to take photos for agent chats."
+        }
+      ],
       [
         "expo-camera",
         {

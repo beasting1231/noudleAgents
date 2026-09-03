@@ -108,19 +108,38 @@ export class WorkspaceApi {
     return this.request(`/v1/artifacts${suffix}`);
   }
 
-  uploadArtifact(asset: UploadAsset, options: { name?: string; taskId?: string; agentId?: string; parentArtifactId?: string } = {}): Promise<ArtifactRecord> {
-    const form = new FormData();
+  async uploadArtifact(asset: UploadAsset, options: { name?: string; taskId?: string; agentId?: string; parentArtifactId?: string } = {}): Promise<ArtifactRecord> {
+    const parameters: Record<string, string> = {
+      name: options.name ?? asset.name,
+      source: "user_upload",
+    };
+    if (options.taskId) parameters.taskId = options.taskId;
+    if (options.agentId) parameters.agentId = options.agentId;
+    if (options.parentArtifactId) parameters.parentArtifactId = options.parentArtifactId;
+
+    // Browsers provide a real Blob. Native pickers provide a local URI, which
+    // React Native's FormData bridge does not accept as a standard form part.
     if (asset.file) {
+      const form = new FormData();
       form.append("file", asset.file, asset.name);
-    } else {
-      form.append("file", { uri: asset.uri, name: asset.name, type: asset.mimeType } as unknown as Blob);
+      for (const [key, value] of Object.entries(parameters)) form.append(key, value);
+      return this.request("/v1/artifacts", { method: "POST", body: form });
     }
-    form.append("name", options.name ?? asset.name);
-    form.append("source", "user_upload");
-    if (options.taskId) form.append("taskId", options.taskId);
-    if (options.agentId) form.append("agentId", options.agentId);
-    if (options.parentArtifactId) form.append("parentArtifactId", options.parentArtifactId);
-    return this.request("/v1/artifacts", { method: "POST", body: form });
+
+    const { File, UploadType } = await import("expo-file-system");
+    const result = await new File(asset.uri).upload(`${this.baseUrl}/v1/artifacts`, {
+      httpMethod: "POST",
+      uploadType: UploadType.MULTIPART,
+      fieldName: "file",
+      mimeType: asset.mimeType,
+      parameters,
+      headers: { authorization: `Bearer ${this.token}` },
+      sessionType: "foreground",
+    });
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(result.body || `noudleAgents request failed (${result.status})`);
+    }
+    return JSON.parse(result.body) as ArtifactRecord;
   }
 
   renameArtifact(id: string, name: string): Promise<ArtifactRecord> {

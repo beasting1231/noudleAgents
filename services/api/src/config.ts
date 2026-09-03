@@ -1,3 +1,5 @@
+import path from "node:path";
+
 export interface RelayConfig {
   host: string;
   port: number;
@@ -13,6 +15,7 @@ export interface RelayConfig {
   sandboxManagerUrl: string;
   computerPublicHost: string | null;
   storagePath: string;
+  workspacePath: string;
   maxArtifactBytes: number;
   agentWorkspaceRoot: string;
   workerPollMs: number;
@@ -43,6 +46,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
     sandboxManagerUrl: (env.RELAY_SANDBOX_MANAGER_URL ?? "http://127.0.0.1:4330").replace(/\/$/, ""),
     computerPublicHost: env.RELAY_COMPUTER_PUBLIC_HOST?.trim() || null,
     storagePath: env.RELAY_STORAGE_PATH ?? "./data/artifacts",
+    workspacePath: env.RELAY_WORKSPACE_PATH ?? path.resolve(process.cwd(), "../../data/workspaces"),
     maxArtifactBytes: positiveInteger(env.RELAY_MAX_ARTIFACT_MB, 100) * 1024 * 1024,
     agentWorkspaceRoot: env.RELAY_AGENT_WORKSPACE_ROOT ?? "agents",
     workerPollMs: positiveInteger(env.RELAY_WORKER_POLL_MS, 50),

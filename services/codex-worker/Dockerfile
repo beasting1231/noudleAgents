@@ -1,7 +1,8 @@
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
-COPY package.json pnpm-workspace.yaml tsconfig.base.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY services/codex-worker/package.json services/codex-worker/package.json
 COPY services/collaboration-mcp/package.json services/collaboration-mcp/package.json
 RUN corepack enable && pnpm install --filter @noudle-agents/codex-worker... --filter @noudle-agents/collaboration-mcp... --frozen-lockfile=false

@@ -37,6 +37,7 @@ services:
       RELAY_CODEX_WORKER_URL: http://codex-worker:4320
       RELAY_SANDBOX_MANAGER_URL: http://sandbox-manager:4330
       RELAY_STORAGE_PATH: /data/artifacts
+      RELAY_WORKSPACE_PATH: /data/workspaces
       RELAY_INTERNAL_TOKEN: ${RELAY_INTERNAL_TOKEN:-relay-local-internal-token}
       RELAY_CONNECTOR_SECRET_KEY: ${RELAY_CONNECTOR_SECRET_KEY:-relay-local-connector-secret}
       RELAY_CODEX_MODE: ${RELAY_CODEX_MODE:-codex}

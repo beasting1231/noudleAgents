@@ -325,7 +325,11 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
     if (typeof headerKey === "string" && headerKey !== input.clientOperationId) {
       throw new DomainError(400, "idempotency_mismatch", "Idempotency header must match clientOperationId");
     }
-    return service.sendMessage(ConversationParamsSchema.parse(request.params).conversationId, input);
+    return service.sendMessage(
+      ConversationParamsSchema.parse(request.params).conversationId,
+      input,
+      (messageId, artifactIds) => artifacts.materializeForMessage(artifactIds, messageId),
+    );
   });
 
   app.get("/v1/schedules", async (request) => {

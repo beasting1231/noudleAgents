@@ -16,6 +16,7 @@ export function testConfig(overrides: Partial<RelayConfig> = {}): RelayConfig {
     sandboxManagerUrl: "http://127.0.0.1:4330",
     computerPublicHost: null,
     storagePath: "./data/test-artifacts",
+    workspacePath: "./data/test-workspaces",
     maxArtifactBytes: 5 * 1024 * 1024,
     agentWorkspaceRoot: "agents",
     workerPollMs: 10,

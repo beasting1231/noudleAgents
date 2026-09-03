@@ -1,21 +1,28 @@
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
 import type { Agent, Conversation, Message } from "@noudle-agents/protocol";
+import * as Clipboard from "expo-clipboard";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import { useEffect, useMemo, useRef, useState, type ComponentRef } from "react";
 import {
   Platform,
   Pressable,
+  Image,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
-import { KeyboardStickyView } from "react-native-keyboard-controller";
+import { KeyboardChatScrollView, KeyboardStickyView } from "react-native-keyboard-controller";
 
 import { ComputerPanel } from "../components/ComputerOverlay";
 import { loadMessageDraft, saveMessageDraft } from "../lib/drafts";
 import { exactSlashCommand, matchingSlashCommands, type SlashCommand } from "../lib/slashCommands";
 import { setVisibleConversation } from "../lib/pushNotifications";
+import { type ArtifactRecord, WorkspaceApi, type UploadAsset } from "../lib/workspaceApi";
 import type { InstanceConfig, RelayState } from "../model";
 import { ConnectorsScreen } from "./ConnectorsScreen";
 
@@ -106,7 +113,7 @@ function AgentList({ state, onOpen, onOpenConnectors }: { state: RelayState; onO
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({ message, config, onOpenImage }: { message: Message; config: InstanceConfig; onOpenImage: (image: { uri: string; name: string; headers: Record<string, string> }) => void }) {
   if (message.role === "system") {
     return <Text style={styles.systemMessage}>{message.content}</Text>;
   }
@@ -115,7 +122,14 @@ function MessageBubble({ message }: { message: Message }) {
   return (
     <View style={[styles.messageRow, own && styles.messageRowOwn]}>
       <View style={[styles.messageBubble, own && styles.messageBubbleOwn]}>
-        <Text style={styles.messageText}>{message.content}</Text>
+        {message.attachments?.map((attachment) => {
+          const uri = `${config.baseUrl.replace(/\/$/, "")}/v1/artifacts/${encodeURIComponent(attachment.artifactId)}/download`;
+          const headers = { authorization: `Bearer ${config.token}` };
+          return attachment.mimeType.startsWith("image/")
+            ? <Pressable accessibilityLabel={`Open ${attachment.name} fullscreen`} key={attachment.artifactId} onPress={() => onOpenImage({ uri, name: attachment.name, headers })}><Image source={{ uri, headers }} style={styles.messageImageAttachment} /></Pressable>
+            : <View style={styles.messageAttachment} key={attachment.artifactId}><Ionicons name="document-outline" size={17} color={palette.secondary} /><Text numberOfLines={1} style={styles.messageAttachmentName}>{attachment.name}</Text></View>;
+        })}
+        {message.content ? <Text style={styles.messageText}>{message.content}</Text> : null}
         <Text style={styles.messageTime}>{timeLabel(message.createdAt)}</Text>
       </View>
     </View>
@@ -139,13 +153,21 @@ function ChatThread({
   connected: boolean;
   onBack: () => void;
   onClear: (conversationId: string) => Promise<Conversation>;
-  onSend: (conversationId: string, agentId: string, content: string) => Promise<void>;
+  onSend: (conversationId: string, agentId: string, content: string, attachmentIds?: string[]) => Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
   const [computerOpen, setComputerOpen] = useState(false);
   const [commandBusy, setCommandBusy] = useState(false);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
-  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const [composerHeight, setComposerHeight] = useState(80);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [attachments, setAttachments] = useState<Array<{ artifact: ArtifactRecord; previewUri: string | null }>>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [fullscreenImage, setFullscreenImage] = useState<{ uri: string; name: string; headers?: Record<string, string> } | null>(null);
+  const workspaceApi = useMemo(() => new WorkspaceApi(config.baseUrl, config.token), [config.baseUrl, config.token]);
+  const scrollRef = useRef<ComponentRef<typeof KeyboardChatScrollView>>(null);
   const messages = useMemo(
     () => state.messages.filter((message) => message.conversationId === conversation.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     [conversation.id, state.messages],
@@ -183,19 +205,69 @@ function ChatThread({
     }
   };
 
-  const submit = () => {
+  const submit = async () => {
     const content = draft.trim();
-    if (!content || commandBusy) return;
+    if ((!content && attachments.length === 0) || commandBusy || attachmentBusy || sending) return;
     const command = exactSlashCommand(content);
     if (command) {
       void runCommand(command);
       return;
     }
     if (commands.length > 0) return;
-    setDraft("");
-    void saveMessageDraft(conversation.id, "");
-    void onSend(conversation.id, agent.id, content);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+    const attachmentIds = attachments.map(({ artifact }) => artifact.id);
+    setSending(true);
+    setAttachmentError(null);
+    try {
+      await onSend(conversation.id, agent.id, content, attachmentIds);
+      setDraft("");
+      void saveMessageDraft(conversation.id, "");
+      setAttachments([]);
+      setAttachmentMenuOpen(false);
+      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "Message could not be sent.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const uploadAssets = async (assets: UploadAsset[]) => {
+    const available = assets.slice(0, Math.max(0, 10 - attachments.length));
+    if (available.length === 0 || attachmentBusy) return;
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+    setAttachmentMenuOpen(false);
+    try {
+      for (const asset of available) {
+        const artifact = await workspaceApi.uploadArtifact(asset, { agentId: agent.id });
+        setAttachments((current) => [...current, { artifact, previewUri: asset.mimeType.startsWith("image/") ? asset.uri : null }]);
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "Attachment could not be uploaded.");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  };
+  const takePhoto = async () => {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (!permission.granted) { setAttachmentError("Camera access is required to take a photo."); return; }
+    const result = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.9 });
+    if (!result.canceled) await uploadAssets(result.assets.map((asset, index) => ({ uri: asset.uri, name: asset.fileName ?? `camera-${Date.now()}-${index + 1}.jpg`, mimeType: asset.mimeType ?? "image/jpeg", size: asset.fileSize })));
+  };
+  const choosePhotos = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsMultipleSelection: true, quality: 1 });
+    if (!result.canceled) await uploadAssets(result.assets.map((asset, index) => ({ uri: asset.uri, name: asset.fileName ?? `photo-${Date.now()}-${index + 1}.jpg`, mimeType: asset.mimeType ?? "image/jpeg", size: asset.fileSize })));
+  };
+  const chooseFiles = async () => {
+    const result = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true });
+    if (!result.canceled) await uploadAssets(result.assets.map((asset) => ({ uri: asset.uri, name: asset.name, mimeType: asset.mimeType ?? "application/octet-stream", size: asset.size, file: asset.file })));
+  };
+  const pasteClipboard = async (payload: Clipboard.PasteEventPayload) => {
+    if (payload.type === "text") { setDraft((current) => `${current}${payload.text}`); return; }
+    const base64 = payload.data.replace(/^data:image\/(?:png|jpeg);base64,/, "");
+    const uri = `${FileSystem.cacheDirectory}clipboard-${Date.now()}.png`;
+    await FileSystem.writeAsStringAsync(uri, base64, { encoding: FileSystem.EncodingType.Base64 });
+    await uploadAssets([{ uri, name: `clipboard-${Date.now()}.png`, mimeType: "image/png" }]);
   };
 
   return (
@@ -222,19 +294,21 @@ function ChatThread({
 
       {computerOpen ? <ComputerPanel agent={agent} config={config} connected={connected} /> : null}
 
-      <ScrollView
+      <KeyboardChatScrollView
         ref={scrollRef}
         style={styles.messages}
         contentContainerStyle={styles.messageContent}
+        keyboardLiftBehavior="always"
+        offset={composerHeight}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
       >
-        {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+        {messages.map((message) => <MessageBubble config={config} key={message.id} message={message} onOpenImage={(image) => setFullscreenImage(image)} />)}
         {messages.length === 0 ? <Text style={styles.empty}>No messages yet</Text> : null}
-      </ScrollView>
+      </KeyboardChatScrollView>
 
-      <KeyboardStickyView>
+      <KeyboardStickyView onLayout={(event) => setComposerHeight(event.nativeEvent.layout.height)}>
         <View style={styles.composerBar}>
           {commands.length > 0 ? (
             <View accessibilityLabel="Commands" style={styles.slashMenu}>
@@ -254,31 +328,50 @@ function ChatThread({
               ))}
             </View>
           ) : null}
-          <View style={styles.composer}>
-            <TextInput
-              accessibilityLabel={`Message ${agent.name}`}
-              multiline
-              onChangeText={setDraft}
-              onSubmitEditing={submit}
-              placeholder="Message"
-              placeholderTextColor={palette.muted}
-              returnKeyType="send"
-              submitBehavior="submit"
-              style={styles.input}
-              value={draft}
-            />
-            <Pressable
-              accessibilityLabel="Send message"
-              accessibilityRole="button"
-              disabled={!draft.trim() || commandBusy || (commands.length > 0 && !exactCommand)}
-              onPress={submit}
-              style={({ pressed }) => [styles.sendButton, (!draft.trim() || commandBusy || (commands.length > 0 && !exactCommand)) && styles.sendDisabled, pressed && styles.pressed]}
-            >
-              <Ionicons name="arrow-up" size={20} color={palette.text} />
-            </Pressable>
+          {attachments.length > 0 ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachmentTray}>{attachments.map(({ artifact, previewUri }) => previewUri ? <View style={styles.imageAttachment} key={artifact.id}><Pressable accessibilityLabel={`Open ${artifact.name} fullscreen`} onPress={() => setFullscreenImage({ uri: previewUri, name: artifact.name })}><Image source={{ uri: previewUri }} style={styles.attachmentPreview} /></Pressable><Pressable accessibilityLabel={`Remove ${artifact.name}`} onPress={() => setAttachments((current) => current.filter(({ artifact: item }) => item.id !== artifact.id))} style={styles.imageAttachmentRemove}><Ionicons name="close" size={14} color={palette.text} /></Pressable></View> : <View style={styles.attachmentChip} key={artifact.id}><Ionicons name="document-outline" size={20} color={palette.secondary} /><Text numberOfLines={1} style={styles.attachmentName}>{artifact.name}</Text><Pressable accessibilityLabel={`Remove ${artifact.name}`} onPress={() => setAttachments((current) => current.filter(({ artifact: item }) => item.id !== artifact.id))} style={styles.attachmentRemove}><Ionicons name="close" size={14} color={palette.text} /></Pressable></View>)}</ScrollView> : null}
+          {attachmentError ? <Text style={styles.attachmentError}>{attachmentError}</Text> : null}
+          <View style={styles.composerRow}>
+            <View style={styles.attachmentButtonWrap}>
+              {attachmentMenuOpen ? <View style={styles.attachmentMenu}>
+                <Pressable onPress={() => void takePhoto()} style={styles.attachmentMenuItem}><Ionicons name="camera-outline" size={21} color={palette.text} /><Text style={styles.attachmentMenuText}>Camera</Text></Pressable>
+                <Pressable onPress={() => void choosePhotos()} style={styles.attachmentMenuItem}><Ionicons name="images-outline" size={21} color={palette.text} /><Text style={styles.attachmentMenuText}>Photos</Text></Pressable>
+                <Pressable onPress={() => void chooseFiles()} style={styles.attachmentMenuItem}><Ionicons name="folder-outline" size={21} color={palette.text} /><Text style={styles.attachmentMenuText}>Files</Text></Pressable>
+                {Platform.OS === "ios" && Clipboard.isPasteButtonAvailable ? <Clipboard.ClipboardPasteButton acceptedContentTypes={["image"]} backgroundColor={palette.composer} foregroundColor={palette.text} cornerStyle="medium" onPress={(payload) => void pasteClipboard(payload)} style={styles.clipboardPasteButton} /> : null}
+              </View> : null}
+              <Pressable accessibilityLabel="Add attachment" accessibilityRole="button" disabled={attachmentBusy || attachments.length >= 10} onPress={() => setAttachmentMenuOpen((open) => !open)} style={({ pressed }) => [styles.attachmentButton, pressed && styles.pressed, (attachmentBusy || attachments.length >= 10) && styles.sendDisabled]}><Ionicons name={attachmentMenuOpen ? "close" : "add"} size={25} color={palette.text} /></Pressable>
+            </View>
+            <View style={styles.composer}>
+              <TextInput
+                accessibilityLabel={`Message ${agent.name}`}
+                multiline
+                onChangeText={setDraft}
+                onSubmitEditing={submit}
+                placeholder="Message"
+                placeholderTextColor={palette.muted}
+                returnKeyType="send"
+                submitBehavior="submit"
+                style={styles.input}
+                value={draft}
+              />
+              <Pressable
+                accessibilityLabel="Send message"
+                accessibilityRole="button"
+                disabled={(!draft.trim() && attachments.length === 0) || commandBusy || attachmentBusy || sending || (commands.length > 0 && !exactCommand)}
+                onPress={() => void submit()}
+                style={({ pressed }) => [styles.sendButton, ((!draft.trim() && attachments.length === 0) || commandBusy || attachmentBusy || sending || (commands.length > 0 && !exactCommand)) && styles.sendDisabled, pressed && styles.pressed]}
+              >
+                <Ionicons name="arrow-up" size={20} color={palette.text} />
+              </Pressable>
+            </View>
           </View>
         </View>
       </KeyboardStickyView>
+      <Modal animationType="fade" onRequestClose={() => setFullscreenImage(null)} presentationStyle="fullScreen" statusBarTranslucent transparent visible={Boolean(fullscreenImage)}>
+        <Pressable accessibilityLabel="Close fullscreen image" accessibilityRole="button" onPress={() => setFullscreenImage(null)} style={styles.imageLightbox}>
+          {fullscreenImage ? <Image accessibilityLabel={fullscreenImage.name} resizeMode="contain" source={{ uri: fullscreenImage.uri, headers: fullscreenImage.headers }} style={styles.imageLightboxImage} /> : null}
+          <View style={styles.imageLightboxClose}><Ionicons name="close" size={25} color={palette.text} /></View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -297,7 +390,7 @@ export function ChatsScreen({
   connected: boolean;
   state: RelayState;
   onSelectConversation: (id: string | null) => void;
-  onSend: (conversationId: string, agentId: string, content: string) => Promise<void>;
+  onSend: (conversationId: string, agentId: string, content: string, attachmentIds?: string[]) => Promise<void>;
   onClear: (conversationId: string) => Promise<Conversation>;
   requestedConversationId: string | null;
   onRequestedConversationHandled: () => void;
@@ -425,6 +518,9 @@ const styles = StyleSheet.create({
   },
   messageBubbleOwn: { borderBottomLeftRadius: 16, borderBottomRightRadius: 5, backgroundColor: palette.bubbleOwn },
   messageText: { color: palette.text, fontSize: 16, lineHeight: 21 },
+  messageAttachment: { minWidth: 160, maxWidth: 260, flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.06)" },
+  messageImageAttachment: { width: 180, height: 180, marginBottom: 6, borderRadius: 12 },
+  messageAttachmentName: { flex: 1, color: palette.text, fontSize: 13 },
   messageTime: { alignSelf: "flex-end", marginTop: 3, color: palette.muted, fontSize: 10 },
   systemMessage: { alignSelf: "center", maxWidth: "82%", marginVertical: 10, color: palette.muted, fontSize: 11, lineHeight: 15, textAlign: "center" },
   composerBar: {
@@ -446,7 +542,26 @@ const styles = StyleSheet.create({
   slashCommand: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14 },
   slashValue: { color: palette.text, fontSize: 14, fontWeight: "700" },
   slashLabel: { color: palette.muted, fontSize: 13 },
+  attachmentTray: { gap: 7, paddingBottom: 7 },
+  imageAttachment: { position: "relative", width: 64, height: 64 },
+  attachmentChip: { width: 148, height: 48, flexDirection: "row", alignItems: "center", gap: 7, padding: 5, borderRadius: 12, backgroundColor: palette.composer },
+  attachmentPreview: { width: 64, height: 64, borderRadius: 11 },
+  imageAttachmentRemove: { position: "absolute", top: 3, right: 3, width: 22, height: 22, alignItems: "center", justifyContent: "center", borderRadius: 11, backgroundColor: "rgba(8,8,9,0.76)" },
+  attachmentName: { flex: 1, color: palette.text, fontSize: 11 },
+  attachmentRemove: { width: 24, height: 24, alignItems: "center", justifyContent: "center", borderRadius: 12, backgroundColor: palette.send },
+  attachmentError: { marginBottom: 6, paddingHorizontal: 6, color: "#ff969b", fontSize: 12 },
+  composerRow: { flexDirection: "row", alignItems: "flex-end", gap: 7 },
+  attachmentButtonWrap: { position: "relative" },
+  attachmentButton: { width: 48, height: 48, alignItems: "center", justifyContent: "center", borderRadius: 24, backgroundColor: palette.composer },
+  attachmentMenu: { position: "absolute", zIndex: 20, bottom: 56, left: 0, width: 178, overflow: "hidden", padding: 6, borderWidth: StyleSheet.hairlineWidth, borderColor: "#383a3d", borderRadius: 16, backgroundColor: "#242629", shadowColor: "#000", shadowOpacity: 0.45, shadowRadius: 18, shadowOffset: { width: 0, height: 8 }, elevation: 12 },
+  attachmentMenuItem: { height: 44, flexDirection: "row", alignItems: "center", gap: 11, paddingHorizontal: 10, borderRadius: 10 },
+  attachmentMenuText: { color: palette.text, fontSize: 15, fontWeight: "500" },
+  clipboardPasteButton: { width: 166, height: 42 },
+  imageLightbox: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.96)" },
+  imageLightboxImage: { width: "100%", height: "100%" },
+  imageLightboxClose: { position: "absolute", top: Platform.OS === "ios" ? 54 : 20, right: 18, width: 40, height: 40, alignItems: "center", justifyContent: "center", borderRadius: 20, backgroundColor: "rgba(255,255,255,0.14)" },
   composer: {
+    flex: 1,
     minHeight: 48,
     maxHeight: 124,
     flexDirection: "row",

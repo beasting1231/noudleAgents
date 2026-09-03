@@ -1,4 +1,5 @@
 import { encodeMobilePairingPayload } from "@noudle-agents/protocol";
+import type { RelayApiClient } from "@noudle-agents/api-client";
 import type {
   Agent,
   Approval,
@@ -20,6 +21,7 @@ import {
   Bot,
   CalendarClock,
   BookOpen,
+  Camera,
   Check,
   ChevronDown,
   ChevronRight,
@@ -37,6 +39,7 @@ import {
   Github,
   Download,
   HardDrive,
+  Image,
   Inbox,
   LayoutList,
   LoaderCircle,
@@ -465,6 +468,7 @@ export function App() {
             activeRun={selectedRun}
             messages={state.messages.filter(({ conversationId }) => conversationId === selectedConversation.id)}
             demoMode={state.connection === "demo"}
+            client={client}
             onRetry={retry}
             onClear={async () => {
               try {
@@ -474,15 +478,16 @@ export function App() {
                 setToast(error instanceof Error ? error.message : "Chat could not be cleared.");
               }
             }}
-            onSend={async (content, settings) => {
+            onSend={async (content, settings, attachmentIds) => {
               const agentId = selectedConversation.memberAgentIds[0];
               if (!agentId) return;
               try {
-                await sendMessage(selectedConversation.id, content, agentId, settings);
+                await sendMessage(selectedConversation.id, content, agentId, settings, attachmentIds);
               } catch (error) {
                 setToast(error instanceof Error ? error.message : "Message was not sent.");
               }
             }}
+            onUploadAttachment={(file) => resources.uploadArtifact(file, selectedAgent ? { agentId: selectedAgent.id } : {})}
             onStop={async () => {
               if (!selectedAgent) return;
               try {
@@ -737,16 +742,18 @@ function readComposerSettings(conversationId: string): ComposerSettings {
   }
 }
 
-function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onClear, onSend, onStop }: {
+function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRetry, onClear, onSend, onStop, onUploadAttachment }: {
   conversation: Conversation;
   agent: Agent | null;
   activeRun: Run | null;
   messages: Message[];
   demoMode: boolean;
+  client: RelayApiClient;
   onRetry: () => Promise<boolean>;
   onClear: () => Promise<void>;
-  onSend: (content: string, settings: ComposerSettings) => Promise<void>;
+  onSend: (content: string, settings: ComposerSettings, attachmentIds: string[]) => Promise<void>;
   onStop: () => Promise<void>;
+  onUploadAttachment: (file: File) => Promise<ArtifactRecord>;
 }) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -756,13 +763,21 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
   const [submenu, setSubmenu] = useState<"model" | "reasoning" | "speed" | null>(null);
   const [commandIndex, setCommandIndex] = useState<number | null>(null);
   const [commandDismissed, setCommandDismissed] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [attachments, setAttachments] = useState<Array<{ artifact: ArtifactRecord; previewUrl: string | null }>>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [fullscreenImage, setFullscreenImage] = useState<{ url: string; name: string } | null>(null);
   const messageScrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const photosInputRef = useRef<HTMLInputElement>(null);
+  const filesInputRef = useRef<HTMLInputElement>(null);
   const ordered = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const showDockerAction = demoMode && ordered.at(-1)?.role === "user";
   const agentRunning = Boolean(activeRun) || Boolean(agent && activeAgentStatuses.has(agent.status));
-  const showStop = agentRunning && !value.trim();
+  const showStop = agentRunning && !value.trim() && attachments.length === 0;
   const commandQuery = value.startsWith("/") && !value.slice(1).includes(" ") && !value.includes("\n")
     ? value.slice(1).toLowerCase()
     : null;
@@ -777,6 +792,11 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
     setSubmenu(null);
     setCommandDismissed(false);
     setCommandIndex(null);
+    setAttachmentMenuOpen(false);
+    setAttachments((current) => {
+      current.forEach(({ previewUrl }) => { if (previewUrl) URL.revokeObjectURL(previewUrl); });
+      return [];
+    });
   }, [conversation.id]);
 
   useEffect(() => {
@@ -793,12 +813,14 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
       if (!composerRef.current?.contains(event.target as Node)) {
         setSettingsOpen(false);
         setSubmenu(null);
+        setAttachmentMenuOpen(false);
       }
     };
     const escape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
         setSettingsOpen(false);
         setSubmenu(null);
+        setAttachmentMenuOpen(false);
       }
     };
     document.addEventListener("pointerdown", close);
@@ -821,16 +843,41 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
     if (container) container.scrollTop = container.scrollHeight;
   }, [conversation.id, ordered.length, ordered.at(-1)?.content]);
 
+  const addFiles = async (files: File[]) => {
+    const available = files.filter((file) => file.size > 0).slice(0, Math.max(0, 10 - attachments.length));
+    if (available.length === 0 || attachmentBusy) return;
+    setAttachmentBusy(true);
+    setAttachmentError(null);
+    setAttachmentMenuOpen(false);
+    try {
+      for (const file of available) {
+        const artifact = await onUploadAttachment(file);
+        setAttachments((current) => [...current, { artifact, previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : null }]);
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : "Attachment could not be uploaded.");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  };
+  const removeAttachment = (id: string) => setAttachments((current) => {
+    const removed = current.find(({ artifact }) => artifact.id === id);
+    if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+    return current.filter(({ artifact }) => artifact.id !== id);
+  });
   const submit = async (contentOverride?: string) => {
     const content = (contentOverride ?? value).trim();
-    if (!content || sending) return;
+    if ((!content && attachments.length === 0) || sending || attachmentBusy) return;
+    const sentAttachments = attachments;
     setValue("");
     setCommandDismissed(false);
     setCommandIndex(null);
     setSending(true);
     try {
-      if (content.toLowerCase() === "/clear") await onClear();
-      else await onSend(content, settings);
+      if (content.toLowerCase() === "/clear" && sentAttachments.length === 0) await onClear();
+      else await onSend(content, settings, sentAttachments.map(({ artifact }) => artifact.id));
+      setAttachments([]);
+      sentAttachments.forEach(({ previewUrl }) => { if (previewUrl) URL.revokeObjectURL(previewUrl); });
     } finally { setSending(false); }
   };
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -869,7 +916,7 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
           </div>
         )}
         <div className="message-column">
-          {ordered.map((message) => <MessageItem key={message.id} message={message} />)}
+          {ordered.map((message) => <MessageItem key={message.id} message={message} client={client} onOpenImage={setFullscreenImage} />)}
           {showDockerAction && <DockerStartCard onRetry={onRetry} />}
         </div>
       </div>
@@ -886,26 +933,49 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
             value={value}
             onChange={(event) => { setValue(event.target.value); setCommandDismissed(false); setCommandIndex(null); }}
             onKeyDown={onComposerKeyDown}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.items).filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter((file): file is File => Boolean(file));
+              if (files.length > 0) { event.preventDefault(); void addFiles(files); }
+            }}
             placeholder="Ask anything"
             rows={1}
             aria-label={`Message ${conversation.title}`}
             aria-controls="slash-command-menu"
             aria-expanded={commandMenuOpen}
           />
+          {attachments.length > 0 && <div className="composer-attachments">{attachments.map(({ artifact, previewUrl }) => previewUrl ? (
+            <div className="composer-image-attachment" key={artifact.id}>
+              <button type="button" className="composer-image-open" aria-label={`Open ${artifact.name} fullscreen`} onClick={() => setFullscreenImage({ url: previewUrl, name: artifact.name })}><img src={previewUrl} alt={artifact.name} /></button>
+              <button type="button" className="composer-image-remove" aria-label={`Remove ${artifact.name}`} onClick={() => removeAttachment(artifact.id)}><X size={13} /></button>
+            </div>
+          ) : <div className="composer-attachment" key={artifact.id}><FileText size={17} /><span><strong>{artifact.name}</strong><small>{formatBytes(artifact.size)}</small></span><button type="button" aria-label={`Remove ${artifact.name}`} onClick={() => removeAttachment(artifact.id)}><X size={13} /></button></div>)}</div>}
+          {attachmentError && <div className="composer-attachment-error">{attachmentError}</div>}
           <div className="composer-bottom">
-            <div className={`composer-settings ${settingsOpen ? "is-open" : ""}`}>
-              <button
-                className="composer-settings-pill"
-                type="button"
-                aria-haspopup="menu"
-                aria-expanded={settingsOpen}
-                onClick={() => { setSettingsOpen((open) => !open); setSubmenu(null); }}
-              >
-                {settings.speed === "extra-fast" && <Zap className="composer-speed-icon" size={13} fill="currentColor" />}
-                <strong>{COMPOSER_MODELS.find(({ value }) => value === settings.model)?.shortLabel}</strong>
-                <span>{REASONING_OPTIONS.find(({ value }) => value === settings.reasoning)?.label}</span>
-                <ChevronDown className="composer-chevron" size={13} />
-              </button>
+            <div className="composer-tools">
+              <div className={`composer-attach ${attachmentMenuOpen ? "is-open" : ""}`}>
+                <button className="composer-plus" type="button" aria-label="Add attachment" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} disabled={attachmentBusy || attachments.length >= 10} onClick={() => { setAttachmentMenuOpen((open) => !open); setSettingsOpen(false); }}><Plus size={17} /></button>
+                <div className="composer-attach-menu" role="menu" aria-hidden={!attachmentMenuOpen}>
+                  <button type="button" role="menuitem" onClick={() => cameraInputRef.current?.click()}><Camera size={16} /><span>Camera</span></button>
+                  <button type="button" role="menuitem" onClick={() => photosInputRef.current?.click()}><Image size={16} /><span>Photos</span></button>
+                  <button type="button" role="menuitem" onClick={() => filesInputRef.current?.click()}><FileText size={16} /><span>Files</span></button>
+                </div>
+                <input ref={cameraInputRef} hidden type="file" accept="image/*" capture="environment" onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+                <input ref={photosInputRef} hidden type="file" accept="image/*" multiple onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+                <input ref={filesInputRef} hidden type="file" multiple onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
+              </div>
+              <div className={`composer-settings ${settingsOpen ? "is-open" : ""}`}>
+                <button
+                  className="composer-settings-pill"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={settingsOpen}
+                  onClick={() => { setSettingsOpen((open) => !open); setSubmenu(null); }}
+                >
+                  {settings.speed === "extra-fast" && <Zap className="composer-speed-icon" size={13} fill="currentColor" />}
+                  <strong>{COMPOSER_MODELS.find(({ value }) => value === settings.model)?.shortLabel}</strong>
+                  <span>{REASONING_OPTIONS.find(({ value }) => value === settings.reasoning)?.label}</span>
+                  <ChevronDown className="composer-chevron" size={13} />
+                </button>
 
               <div className="composer-settings-menu" role="menu" aria-hidden={!settingsOpen}>
                 <ComposerSettingsRow label="Model" value={COMPOSER_MODELS.find(({ value }) => value === settings.model)?.shortLabel ?? ""} active={submenu === "model"} onOpen={() => setSubmenu(submenu === "model" ? null : "model")} />
@@ -922,10 +992,11 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
                   {SPEED_OPTIONS.map((option) => <ComposerOption key={option.value} label={option.label} selected={settings.speed === option.value} onClick={() => { setSettings({ ...settings, speed: option.value }); setSettingsOpen(false); setSubmenu(null); }} />)}
                 </ComposerOptionsPanel>
               </div>
+              </div>
             </div>
             <button
               className={`send-button ${showStop ? "send-button--stop" : ""}`}
-              disabled={showStop ? stopping : !value.trim() || sending}
+              disabled={showStop ? stopping : (!value.trim() && attachments.length === 0) || sending || attachmentBusy}
               onClick={() => showStop ? void stop() : void submit()}
               aria-label={showStop ? "Stop agent" : "Send message"}
               title={showStop ? "Stop agent" : "Send message"}
@@ -935,6 +1006,7 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, onRetry, onC
           </div>
         </div>
       </div>
+      {fullscreenImage && createPortal(<div className="image-lightbox" role="dialog" aria-modal="true" aria-label={fullscreenImage.name} onClick={() => setFullscreenImage(null)}><img src={fullscreenImage.url} alt={fullscreenImage.name} /><button type="button" aria-label="Close fullscreen image" onClick={() => setFullscreenImage(null)}><X size={22} /></button></div>, document.body)}
     </div>
   );
 }
@@ -996,10 +1068,36 @@ function ComposerOption({ label, selected, onClick }: { label: string; selected:
   return <button type="button" role="menuitemradio" aria-checked={selected} className={`composer-option ${selected ? "is-selected" : ""}`} onClick={onClick}><span>{label}</span>{selected && <Check size={14} />}</button>;
 }
 
-function MessageItem({ message }: { message: Message }) {
+function MessageImageAttachment({ artifactId, name, client, onOpen }: { artifactId: string; name: string; client: RelayApiClient; onOpen: (image: { url: string; name: string }) => void }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    void fetch(`${client.baseUrl}/v1/artifacts/${encodeURIComponent(artifactId)}/download`, {
+      headers: { authorization: `Bearer ${client.token}` },
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`Image download failed (${response.status})`);
+      objectUrl = URL.createObjectURL(await response.blob());
+      if (active) setUrl(objectUrl);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [artifactId, client]);
+
+  return url ? <button type="button" className="message-image-attachment" aria-label={`Open ${name} fullscreen`} onClick={() => onOpen({ url, name })}><img src={url} alt={name} /></button> : <div className="message-image-placeholder" aria-label={`Loading ${name}`} />;
+}
+
+function MessageItem({ message, client, onOpenImage }: { message: Message; client: RelayApiClient; onOpenImage: (image: { url: string; name: string }) => void }) {
+  const imageOnly = Boolean(message.attachments?.length) && !message.content && message.attachments!.every(({ mimeType }) => mimeType.startsWith("image/"));
   return (
-    <article className={`message message--${message.role}`}>
-      <p>{message.content}</p>
+    <article className={`message message--${message.role} ${imageOnly ? "message--image-only" : ""}`}>
+      {message.attachments?.length ? <div className="message-attachments">{message.attachments.map((attachment) => attachment.mimeType.startsWith("image/")
+        ? <MessageImageAttachment artifactId={attachment.artifactId} name={attachment.name} client={client} onOpen={onOpenImage} key={attachment.artifactId} />
+        : <div className="message-attachment" key={attachment.artifactId}><FileText size={15} /><span>{attachment.name}</span></div>)}</div> : null}
+      {message.content ? <p>{message.content}</p> : null}
     </article>
   );
 }

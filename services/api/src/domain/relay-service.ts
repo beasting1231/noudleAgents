@@ -17,6 +17,7 @@ import {
   type CreateTaskInput,
   type DelegateTaskInput,
   type Message,
+  type MessageAttachment,
   type RelayEvent,
   type Run,
   type Schedule,
@@ -349,7 +350,11 @@ export class RelayService {
     );
   }
 
-  async sendMessage(conversationId: string, input: SendMessageInput): Promise<{ message: Message; runId: string }> {
+  async sendMessage(
+    conversationId: string,
+    input: SendMessageInput,
+    resolveAttachments?: (messageId: string, artifactIds: string[]) => Promise<MessageAttachment[]>,
+  ): Promise<{ message: Message; runId: string }> {
     const conversation = await this.getConversation(conversationId);
     const agent = await this.getAgent(input.agentId);
     if (!conversation.memberAgentIds.includes(agent.id)) {
@@ -363,13 +368,21 @@ export class RelayService {
       }
     }
     const now = new Date().toISOString();
+    const messageId = this.id("msg");
+    const attachments = input.attachmentIds.length > 0
+      ? await resolveAttachments?.(messageId, input.attachmentIds)
+      : [];
+    if (input.attachmentIds.length > 0 && !attachments) {
+      throw new DomainError(500, "attachment_service_unavailable", "Attachments could not be prepared for the agent");
+    }
     const message = MessageSchema.parse({
-      id: this.id("msg"),
+      id: messageId,
       workspaceId: this.config.workspaceId,
       conversationId,
       role: "user",
       authorId: this.config.ownerId,
       content: input.content,
+      attachments,
       replyToMessageId: input.replyToMessageId ?? null,
       clientOperationId: input.clientOperationId,
       createdAt: now,

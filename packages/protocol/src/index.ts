@@ -85,6 +85,14 @@ export const ConversationSchema = z.object({
   updatedAt: TimestampSchema,
 });
 
+export const MessageAttachmentSchema = z.object({
+  artifactId: IdSchema,
+  name: z.string().trim().min(1).max(240),
+  mimeType: z.string().min(1).max(160),
+  size: z.number().int().nonnegative(),
+  path: z.string().min(1).max(2_000),
+});
+
 export const MessageSchema = z.object({
   id: IdSchema,
   workspaceId: IdSchema,
@@ -92,6 +100,7 @@ export const MessageSchema = z.object({
   role: MessageRoleSchema,
   authorId: IdSchema.nullable(),
   content: z.string().max(200_000),
+  attachments: z.array(MessageAttachmentSchema).max(10).optional(),
   replyToMessageId: IdSchema.nullable(),
   clientOperationId: z.string().max(160).nullable(),
   createdAt: TimestampSchema,
@@ -316,12 +325,16 @@ export const ComposerSettingsSchema = z.object({
 });
 
 export const SendMessageInputSchema = z.object({
-  content: z.string().trim().min(1).max(200_000),
+  content: z.string().trim().max(200_000),
+  attachmentIds: z.array(IdSchema).max(10).default([]),
   agentId: IdSchema,
   taskId: IdSchema.nullable().optional(),
   replyToMessageId: IdSchema.nullable().optional(),
   clientOperationId: z.string().min(1).max(160),
   settings: ComposerSettingsSchema.optional(),
+}).refine((input) => input.content.length > 0 || input.attachmentIds.length > 0, {
+  message: "A message needs text or at least one attachment",
+  path: ["content"],
 });
 
 export const CreateTaskInputSchema = TaskSchema.pick({
@@ -371,6 +384,7 @@ export type Agent = z.infer<typeof AgentSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type Conversation = z.infer<typeof ConversationSchema>;
 export type Message = z.infer<typeof MessageSchema>;
+export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 export type Run = z.infer<typeof RunSchema>;

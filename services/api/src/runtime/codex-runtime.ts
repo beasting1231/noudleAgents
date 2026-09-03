@@ -152,7 +152,10 @@ export class CodexAgentRuntime implements AgentRuntime {
       "If the user has taken control, wait until control is returned, inspect the screen, and resume from the current state.",
       "Computer control state must come from the latest computer tool result, never from an earlier turn or your prior response. A shared computer with controlMode 'watch' is available for agent actions; controlMode 'user' means the owner currently has control. When the user says control was returned or asks you to retry, immediately call computer_screenshot or browser_navigate again. If that call succeeds, continue the requested browser work and do not claim that control is blocked.",
     ].join("\n\n");
-    return `${computerGuidance}\n\n${context.trigger.content}${task}`;
+    const attachments = context.trigger.attachments?.length
+      ? `\n\nAttachments from the user:\n${context.trigger.attachments.map((attachment) => `- ${attachment.name} (${attachment.mimeType}): ${attachment.path}`).join("\n")}\nInspect these files directly. Images can be opened with the image viewing tool.`
+      : "";
+    return `${computerGuidance}\n\n${context.trigger.content}${attachments}${task}`;
   }
 
   private async consumeTurn(

@@ -26,6 +26,11 @@ describe("protocol", () => {
     expect(result.settings).not.toHaveProperty("permissionMode");
   });
 
+  it("allows attachment-only messages and rejects empty messages", () => {
+    expect(SendMessageInputSchema.parse({ content: "", attachmentIds: ["artifact-1"], agentId: "agent-builder", clientOperationId: "attachment-operation" }).attachmentIds).toEqual(["artifact-1"]);
+    expect(() => SendMessageInputSchema.parse({ content: "", agentId: "agent-builder", clientOperationId: "empty-operation" })).toThrow();
+  });
+
   it("round-trips a versioned mobile pairing code", () => {
     const payload = { type: "noudleAgents.mobile-pair" as const, version: 1 as const, baseUrl: "https://agents.example.com", token: "owner-secret" };
     expect(decodeMobilePairingPayload(encodeMobilePairingPayload(payload))).toEqual(payload);

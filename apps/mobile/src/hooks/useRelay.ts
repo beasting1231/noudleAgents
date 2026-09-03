@@ -1,5 +1,5 @@
 import { RelayApiClient, type RelaySnapshot } from "@noudle-agents/api-client";
-import type { Conversation, Message } from "@noudle-agents/protocol";
+import type { Conversation } from "@noudle-agents/protocol";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Platform } from "react-native";
 
@@ -88,26 +88,15 @@ export function useRelay() {
     return () => clearInterval(interval);
   }, [config.baseUrl, config.token, configured, state.connection]);
 
-  const sendMessage = useCallback(async (conversationId: string, agentId: string, content: string) => {
+  const sendMessage = useCallback(async (conversationId: string, agentId: string, content: string, attachmentIds: string[] = []) => {
     const id = operationId();
-    const message: Message = {
-      id,
-      workspaceId: "workspace_local",
-      conversationId,
-      role: "user",
-      authorId: null,
-      content,
-      replyToMessageId: null,
-      clientOperationId: id,
-      createdAt: new Date().toISOString(),
-    };
-    dispatch({ type: "optimisticMessage", message });
-    if (!clientRef.current) return;
+    if (!clientRef.current) throw new Error("Connect before sending a message");
     try {
-      const result = await clientRef.current.sendMessage(conversationId, { content, agentId, taskId: null, replyToMessageId: null, clientOperationId: id });
+      const result = await clientRef.current.sendMessage(conversationId, { content, attachmentIds, agentId, taskId: null, replyToMessageId: null, clientOperationId: id });
       dispatch({ type: "optimisticMessage", message: result.message });
     } catch (error) {
       dispatch({ type: "connection", connection: "offline", error: error instanceof Error ? error.message : "Message queued offline" });
+      throw error;
     }
   }, []);
 

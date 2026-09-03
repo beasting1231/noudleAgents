@@ -16,7 +16,7 @@ describe("artifact APIs", () => {
   beforeEach(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), "relay-artifacts-test-"));
     context = await createRelayApp({
-      config: testConfig({ storagePath: directory }),
+      config: testConfig({ storagePath: directory, workspacePath: path.join(directory, "workspace") }),
       repository: new MemoryRelayRepository(),
       sandboxManager: new FakeSandboxManager(),
       startWorker: false,
@@ -92,6 +92,22 @@ describe("artifact APIs", () => {
     expect(second).toMatchObject({ logicalId: first.logicalId, version: 2, parentArtifactId: first.id });
     expect(second.checksum).not.toBe(first.checksum);
     expect((await context.artifacts.list({})).map((artifact) => artifact.version).sort()).toEqual([1, 2]);
+  });
+
+  it("attaches uploaded files to a message and materializes an agent-readable workspace path", async () => {
+    const artifact = (await (await upload("visual evidence")).json()) as ArtifactRecord;
+    const response = await fetch(`${baseUrl}/v1/conversations/conversation-builder/messages`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-owner-token", "content-type": "application/json", "idempotency-key": "attachment-message" },
+      body: JSON.stringify({ content: "Inspect this", attachmentIds: [artifact.id], agentId: "agent-builder", clientOperationId: "attachment-message" }),
+    });
+    expect(response.status).toBe(200);
+    const message = (await response.json()).message;
+    expect(message.attachments).toEqual([expect.objectContaining({ artifactId: artifact.id, name: "notes.txt", path: expect.stringMatching(/^\/workspace\/team\/chat-attachments\//) })]);
+    const storedPath = path.join(directory, "workspace", message.attachments[0].path.replace("/workspace/", ""));
+    expect(await fs.readFile(storedPath, "utf8")).toBe("visual evidence");
+    expect((await fs.stat(path.dirname(storedPath))).mode & 0o777).toBe(0o755);
+    expect((await fs.stat(storedPath)).mode & 0o777).toBe(0o644);
   });
 
   it("rejects agent attribution spoofing and storage path escapes", async () => {

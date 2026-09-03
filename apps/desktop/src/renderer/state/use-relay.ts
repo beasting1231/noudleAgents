@@ -173,11 +173,12 @@ export function useRelay() {
     return conversation;
   }, [client]);
 
-  const sendMessage = useCallback(async (conversationId: string, content: string, agentId: string, settings: ComposerSettings): Promise<void> => {
+  const sendMessage = useCallback(async (conversationId: string, content: string, agentId: string, settings: ComposerSettings, attachmentIds: string[] = []): Promise<void> => {
     const operationId = crypto.randomUUID();
     if (modeRef.current === "live") {
       const response = await client.sendMessage(conversationId, {
         content,
+        attachmentIds,
         agentId,
         clientOperationId: operationId,
         settings,
@@ -210,6 +211,7 @@ export function useRelay() {
       role: "user",
       authorId: "user_local_owner",
       content,
+      attachments: attachmentIds.map((artifactId) => ({ artifactId, name: "Attachment", mimeType: "application/octet-stream", size: 0, path: "demo" })),
       replyToMessageId: null,
       clientOperationId: operationId,
       createdAt,
