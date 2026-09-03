@@ -37,6 +37,7 @@ app.post("/v1/threads/:threadId/resume", async (request) => {
     agentId: z.string().min(1).optional(),
     model: z.string().optional(),
     speed: z.enum(["balanced", "extra-fast"]).optional(),
+    developerInstructions: z.string().max(100_000).optional(),
   }).parse(request.body ?? {});
   return codex.resumeThread(params.threadId, body);
 });

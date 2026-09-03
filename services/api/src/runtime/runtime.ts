@@ -1,4 +1,4 @@
-import type { Agent, ComposerSettings, Message, Run, Task } from "@noudle-agents/protocol";
+import type { Agent, ComposerSettings, Message, MessageResponsePart, Run, Task } from "@noudle-agents/protocol";
 
 export interface RuntimeContext {
   run: Run;
@@ -16,6 +16,7 @@ export interface RuntimeEvent {
 export interface RuntimeResult {
   content: string;
   summary: string;
+  responseParts?: MessageResponsePart[];
   suggestedDelegation?: {
     role: "research" | "operations";
     title: string;

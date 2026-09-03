@@ -6,10 +6,11 @@ export class RelayCollaborationClient {
   ) {}
 
   async request(path: string, init: RequestInit = {}): Promise<unknown> {
+    const contentHeaders = init.body === undefined ? {} : { "content-type": "application/json" };
     const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}${path}`, {
       ...init,
       headers: {
-        "content-type": "application/json",
+        ...contentHeaders,
         authorization: `Bearer ${this.token}`,
         "x-relay-agent-id": this.agentId,
         ...init.headers,

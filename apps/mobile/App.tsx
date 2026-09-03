@@ -38,9 +38,12 @@ function AppContent() {
         config={relay.config}
         connected={relay.state.connection === "live"}
         state={relay.state}
+        runs={relay.runs}
+        liveResponses={relay.liveResponses}
         onSelectConversation={selectConversation}
         onSend={relay.sendMessage}
         onClear={relay.clearConversation}
+        onStop={relay.interruptAgent}
         requestedConversationId={requestedConversationId}
         onRequestedConversationHandled={clearRequestedConversation}
       />

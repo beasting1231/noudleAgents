@@ -11,6 +11,7 @@ import type {
   CreateAgentInput,
   CreateConversationInput,
   Message,
+  MessageResponsePart,
   Run,
   Schedule,
   Task,
@@ -78,6 +79,7 @@ import { formatBytes, type ArtifactRecord } from "./state/workspace-resources";
 import { useWorkspaceResources } from "./state/use-workspace-resources";
 import { useSchedules } from "./state/use-schedules";
 import { moveCommandSelection, resolveComposerEnter } from "./slash-commands";
+import { ResponseContent } from "./ResponseContent";
 
 type DialogName = "agent" | "approvals" | "connection" | "connectors" | "mobile" | null;
 
@@ -212,7 +214,7 @@ function StatusDot({ status }: { status: Agent["status"] }) {
 }
 
 export function App() {
-  const { state, runs, dispatch, client, retry, createAgent, deleteAgent, createConversation, clearConversation, sendMessage, interruptAgent, resolveApproval } = useRelay();
+  const { state, runs, liveResponses, dispatch, client, retry, createAgent, deleteAgent, createConversation, clearConversation, sendMessage, interruptAgent, resolveApproval } = useRelay();
   const resources = useWorkspaceResources(client, state.connection);
   const scheduleResources = useSchedules(client, state.connection, state.cursor);
   const [dialog, setDialog] = useState<DialogName>(null);
@@ -466,6 +468,7 @@ export function App() {
             conversation={selectedConversation}
             agent={selectedAgent}
             activeRun={selectedRun}
+            liveParts={selectedRun ? liveResponses[selectedRun.id] : undefined}
             messages={state.messages.filter(({ conversationId }) => conversationId === selectedConversation.id)}
             demoMode={state.connection === "demo"}
             client={client}
@@ -727,6 +730,7 @@ const DEFAULT_COMPOSER_SETTINGS: ComposerSettings = {
 
 const SLASH_COMMANDS = [
   { value: "/clear", label: "Clear chat", icon: RotateCcw },
+  { value: "/stop", label: "Stop agent", icon: Square },
 ] as const;
 
 function readComposerSettings(conversationId: string): ComposerSettings {
@@ -742,10 +746,11 @@ function readComposerSettings(conversationId: string): ComposerSettings {
   }
 }
 
-function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRetry, onClear, onSend, onStop, onUploadAttachment }: {
+function Chat({ conversation, agent, activeRun, liveParts, messages, demoMode, client, onRetry, onClear, onSend, onStop, onUploadAttachment }: {
   conversation: Conversation;
   agent: Agent | null;
   activeRun: Run | null;
+  liveParts: MessageResponsePart[] | undefined;
   messages: Message[];
   demoMode: boolean;
   client: RelayApiClient;
@@ -777,6 +782,15 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRe
   const ordered = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const showDockerAction = demoMode && ordered.at(-1)?.role === "user";
   const agentRunning = Boolean(activeRun) || Boolean(agent && activeAgentStatuses.has(agent.status));
+  const activityLabel = activeRun?.status === "queued" || activeRun?.status === "starting"
+    ? "Thinking"
+    : activeRun?.status === "running"
+      ? liveParts?.some((part) => part.type === "tool" || part.text.trim()) ? "Working" : "Thinking"
+      : !activeRun && (agent?.status === "queued" || agent?.status === "planning")
+        ? "Thinking"
+        : !activeRun && agent?.status === "working"
+          ? "Working"
+          : null;
   const showStop = agentRunning && !value.trim() && attachments.length === 0;
   const commandQuery = value.startsWith("/") && !value.slice(1).includes(" ") && !value.includes("\n")
     ? value.slice(1).toLowerCase()
@@ -841,7 +855,7 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRe
   useLayoutEffect(() => {
     const container = messageScrollRef.current;
     if (container) container.scrollTop = container.scrollHeight;
-  }, [conversation.id, ordered.length, ordered.at(-1)?.content]);
+  }, [conversation.id, ordered.length, ordered.at(-1)?.content, liveParts]);
 
   const addFiles = async (files: File[]) => {
     const available = files.filter((file) => file.size > 0).slice(0, Math.max(0, 10 - attachments.length));
@@ -875,6 +889,7 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRe
     setSending(true);
     try {
       if (content.toLowerCase() === "/clear" && sentAttachments.length === 0) await onClear();
+      else if (content.toLowerCase() === "/stop" && sentAttachments.length === 0) await onStop();
       else await onSend(content, settings, sentAttachments.map(({ artifact }) => artifact.id));
       setAttachments([]);
       sentAttachments.forEach(({ previewUrl }) => { if (previewUrl) URL.revokeObjectURL(previewUrl); });
@@ -908,7 +923,7 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRe
   return (
     <div className="chat-body">
       <div className="message-scroll" ref={messageScrollRef} aria-live="polite">
-        {ordered.length === 0 && (
+        {ordered.length === 0 && !activityLabel && (
           <div className="chat-start">
             <div className="chat-start-mark"><MessageCircle size={20} /></div>
             <h2>Start with an objective</h2>
@@ -917,6 +932,8 @@ function Chat({ conversation, agent, activeRun, messages, demoMode, client, onRe
         )}
         <div className="message-column">
           {ordered.map((message) => <MessageItem key={message.id} message={message} client={client} onOpenImage={setFullscreenImage} />)}
+          {liveParts?.length ? <article className="message message--agent message--streaming"><ResponseContent content={liveParts.filter((part) => part.type === "text").map((part) => part.type === "text" ? part.text : "").join("\n\n")} parts={liveParts} /></article> : null}
+          {activityLabel ? <div className="run-activity" role="status" aria-live="polite"><span>{activityLabel}</span></div> : null}
           {showDockerAction && <DockerStartCard onRetry={onRetry} />}
         </div>
       </div>
@@ -1097,7 +1114,7 @@ function MessageItem({ message, client, onOpenImage }: { message: Message; clien
       {message.attachments?.length ? <div className="message-attachments">{message.attachments.map((attachment) => attachment.mimeType.startsWith("image/")
         ? <MessageImageAttachment artifactId={attachment.artifactId} name={attachment.name} client={client} onOpen={onOpenImage} key={attachment.artifactId} />
         : <div className="message-attachment" key={attachment.artifactId}><FileText size={15} /><span>{attachment.name}</span></div>)}</div> : null}
-      {message.content ? <p>{message.content}</p> : null}
+      {message.content ? message.role === "agent" ? <ResponseContent content={message.content} parts={message.responseParts} /> : <p>{message.content}</p> : null}
     </article>
   );
 }

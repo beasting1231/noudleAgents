@@ -183,7 +183,6 @@ export class RelayService {
     actorType: "user" | "agent" = "user",
     actorId = this.config.ownerId,
   ): Promise<Agent> {
-    if (actorType === "agent") throw new DomainError(403, "agent_configuration_forbidden", "Agents cannot create or configure agents");
     const now = new Date().toISOString();
     const agent = AgentSchema.parse({
       id: this.id("agt"),
@@ -212,7 +211,6 @@ export class RelayService {
     actorType: "user" | "agent" = "user",
     actorId = this.config.ownerId,
   ): Promise<Agent> {
-    if (actorType === "agent") throw new DomainError(403, "agent_configuration_forbidden", "Agents cannot create or configure agents");
     const current = await this.getAgent(id);
     const agent = AgentSchema.parse({ ...current, ...patch, id: current.id, workspaceId: current.workspaceId, updatedAt: new Date().toISOString() });
     await this.repository.put("agents", agent);
@@ -221,7 +219,6 @@ export class RelayService {
   }
 
   async deleteAgent(id: string, actorType: "user" | "agent" = "user", actorId = this.config.ownerId): Promise<void> {
-    if (actorType === "agent") throw new DomainError(403, "agent_configuration_forbidden", "Agents cannot create or configure agents");
     const agent = await this.getAgent(id);
     const [tasks, runs, conversations] = await Promise.all([this.listTasks(), this.listRuns(), this.listConversations()]);
     if (tasks.some((task) => task.ownerAgentId === id && !terminalTaskStatuses.has(task.status))) {

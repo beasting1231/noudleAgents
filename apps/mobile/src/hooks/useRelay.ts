@@ -1,5 +1,5 @@
 import { RelayApiClient, type RelaySnapshot } from "@noudle-agents/api-client";
-import type { Conversation } from "@noudle-agents/protocol";
+import type { Conversation, MessageResponsePart, RelayEvent, Run } from "@noudle-agents/protocol";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Platform } from "react-native";
 
@@ -13,10 +13,38 @@ function operationId(): string {
   return `mobile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+const activeRunStatuses = new Set<Run["status"]>(["queued", "starting", "running", "waiting_approval", "waiting_user"]);
+
+function captureLiveResponse(current: Record<string, MessageResponsePart[]>, event: RelayEvent): Record<string, MessageResponsePart[]> {
+  if (event.type === "message.delta") {
+    const runId = typeof event.payload.runId === "string" ? event.payload.runId : event.aggregateId;
+    const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
+    if (!delta) return current;
+    const parts = [...(current[runId] ?? [])];
+    const last = parts.at(-1);
+    if (last?.type === "text") parts[parts.length - 1] = { ...last, text: last.text + delta };
+    else parts.push({ type: "text", text: delta });
+    return { ...current, [runId]: parts };
+  }
+  if (event.type === "tool.started" || event.type === "tool.completed") {
+    const raw = event.payload.part;
+    if (!raw || typeof raw !== "object" || (raw as { type?: unknown }).type !== "tool") return current;
+    const part = raw as MessageResponsePart;
+    const parts = [...(current[event.aggregateId] ?? [])];
+    const index = parts.findIndex((candidate) => candidate.type === "tool" && candidate.id === (part.type === "tool" ? part.id : ""));
+    if (index >= 0) parts[index] = part;
+    else parts.push(part);
+    return { ...current, [event.aggregateId]: parts };
+  }
+  return current;
+}
+
 export function useRelay() {
   const [state, dispatch] = useReducer(relayReducer, initialRelayState);
   const [config, setConfigState] = useState<InstanceConfig>({ baseUrl: "", token: "" });
   const [configured, setConfigured] = useState(false);
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [liveResponses, setLiveResponses] = useState<Record<string, MessageResponsePart[]>>({});
   const clientRef = useRef<RelayApiClient | null>(null);
 
   const connect = useCallback(async (nextConfig: InstanceConfig, persist = false) => {
@@ -35,7 +63,8 @@ export function useRelay() {
     const client = new RelayApiClient(normalized.baseUrl, normalized.token);
     clientRef.current = client;
     try {
-      const snapshot = await client.getSnapshot();
+      const [snapshot, nextRuns] = await Promise.all([client.getSnapshot(), client.listRuns()]);
+      setRuns(nextRuns);
       dispatch({ type: "hydrate", snapshot, source: "server" });
       return true;
     } catch (error) {
@@ -62,8 +91,16 @@ export function useRelay() {
     }
 
     const interval = setInterval(() => {
-      void client.getSnapshot().then((snapshot: RelaySnapshot) => {
-        if (!disposed) dispatch({ type: "hydrate", snapshot, source: "server" });
+      const after = state.cursor;
+      void Promise.all([client.getSnapshot(), client.listRuns(), client.listEvents(after).catch(() => [] as RelayEvent[])]).then(([snapshot, nextRuns, events]: [RelaySnapshot, Run[], RelayEvent[]]) => {
+        if (!disposed) {
+          for (const event of events) {
+            dispatch({ type: "event", event });
+            setLiveResponses((current) => captureLiveResponse(current, event));
+          }
+          setRuns(nextRuns);
+          dispatch({ type: "hydrate", snapshot, source: "server" });
+        }
       }).catch((error: unknown) => {
         if (!disposed) dispatch({ type: "connection", connection: "offline", error: error instanceof Error ? error.message : "Sync interrupted" });
       });
@@ -75,6 +112,14 @@ export function useRelay() {
       stopEvents?.();
     };
   }, [state.connection, state.cursor]);
+
+  useEffect(() => {
+    const activeIds = new Set(runs.filter((run) => activeRunStatuses.has(run.status)).map((run) => run.id));
+    setLiveResponses((current) => {
+      const retained = Object.fromEntries(Object.entries(current).filter(([runId]) => activeIds.has(runId)));
+      return Object.keys(retained).length === Object.keys(current).length ? current : retained;
+    });
+  }, [runs]);
 
   useEffect(() => {
     if (!configured || state.connection === "live" || state.connection === "loading" || !config.baseUrl || !config.token) return;
@@ -94,6 +139,7 @@ export function useRelay() {
     try {
       const result = await clientRef.current.sendMessage(conversationId, { content, attachmentIds, agentId, taskId: null, replyToMessageId: null, clientOperationId: id });
       dispatch({ type: "optimisticMessage", message: result.message });
+      void clientRef.current.listRuns().then(setRuns).catch(() => undefined);
     } catch (error) {
       dispatch({ type: "connection", connection: "offline", error: error instanceof Error ? error.message : "Message queued offline" });
       throw error;
@@ -107,6 +153,20 @@ export function useRelay() {
     dispatch({ type: "hydrate", snapshot, source: "server" });
     dispatch({ type: "selectConversation", conversationId: replacement.id });
     return replacement;
+  }, []);
+
+  const interruptAgent = useCallback(async (conversationId: string, agentId: string): Promise<void> => {
+    if (!clientRef.current) throw new Error("Connect to stop this agent");
+    const latestRuns = await clientRef.current.listRuns();
+    const activeRun = [...latestRuns]
+      .reverse()
+      .find((run) => run.conversationId === conversationId && run.agentId === agentId && activeRunStatuses.has(run.status));
+    if (!activeRun) return;
+    await clientRef.current.interruptRun(activeRun.id);
+    const now = new Date().toISOString();
+    setRuns(latestRuns.map((run) => run.id === activeRun.id
+      ? { ...run, status: "interrupted", completedAt: now, updatedAt: now }
+      : run));
   }, []);
 
   const registerPushSubscription = useCallback(async (token: string) => {
@@ -134,14 +194,17 @@ export function useRelay() {
 
   return useMemo(() => ({
     state,
+    runs,
+    liveResponses,
     config,
     configured,
     dispatch,
     connect: (nextConfig: InstanceConfig) => connect(nextConfig, true),
     sendMessage,
     clearConversation,
+    interruptAgent,
     registerPushSubscription,
     resolveApproval,
     delegateTask,
-  }), [clearConversation, config, configured, connect, delegateTask, registerPushSubscription, resolveApproval, sendMessage, state]);
+  }), [clearConversation, config, configured, connect, delegateTask, interruptAgent, liveResponses, registerPushSubscription, resolveApproval, runs, sendMessage, state]);
 }

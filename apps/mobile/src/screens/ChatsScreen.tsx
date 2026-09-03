@@ -1,5 +1,5 @@
 import { Ionicons, MaterialCommunityIcons } from "@expo/vector-icons";
-import type { Agent, Conversation, Message } from "@noudle-agents/protocol";
+import type { Agent, Conversation, Message, MessageResponsePart, Run } from "@noudle-agents/protocol";
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
@@ -19,6 +19,8 @@ import {
 import { KeyboardChatScrollView, KeyboardStickyView } from "react-native-keyboard-controller";
 
 import { ComputerPanel } from "../components/ComputerOverlay";
+import { MobileResponseContent } from "../components/MobileResponseContent";
+import { ShimmerText } from "../components/ShimmerText";
 import { loadMessageDraft, saveMessageDraft } from "../lib/drafts";
 import { exactSlashCommand, matchingSlashCommands, type SlashCommand } from "../lib/slashCommands";
 import { setVisibleConversation } from "../lib/pushNotifications";
@@ -40,6 +42,9 @@ const palette = {
   muted: "#717478",
 } as const;
 
+const COMPOSER_LINE_HEIGHT = 22;
+const COMPOSER_MAX_HEIGHT = 110;
+
 function timeLabel(value: string): string {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value));
 }
@@ -49,6 +54,14 @@ function statusLabel(status: string): string {
   if (status === "waiting_user") return "waiting for you";
   if (status === "waiting_agent") return "waiting";
   return status.replaceAll("_", " ");
+}
+
+function runActivityLabel(run: Run | null, liveParts: MessageResponsePart[] | undefined, agent: Agent): "Thinking" | "Working" | null {
+  if (run?.status === "queued" || run?.status === "starting") return "Thinking";
+  if (run?.status === "running") return liveParts?.some((part) => part.type === "tool" || part.text.trim()) ? "Working" : "Thinking";
+  if (!run && (agent.status === "queued" || agent.status === "planning")) return "Thinking";
+  if (!run && agent.status === "working") return "Working";
+  return null;
 }
 
 function Initials({ agent, size = 54 }: { agent: Agent; size?: number }) {
@@ -121,7 +134,7 @@ function MessageBubble({ message, config, onOpenImage }: { message: Message; con
   const own = message.role === "user";
   return (
     <View style={[styles.messageRow, own && styles.messageRowOwn]}>
-      <View style={[styles.messageBubble, own && styles.messageBubbleOwn]}>
+      <View style={[styles.messageBubble, !own && styles.messageBubbleAgent, own && styles.messageBubbleOwn]}>
         {message.attachments?.map((attachment) => {
           const uri = `${config.baseUrl.replace(/\/$/, "")}/v1/artifacts/${encodeURIComponent(attachment.artifactId)}/download`;
           const headers = { authorization: `Bearer ${config.token}` };
@@ -129,7 +142,7 @@ function MessageBubble({ message, config, onOpenImage }: { message: Message; con
             ? <Pressable accessibilityLabel={`Open ${attachment.name} fullscreen`} key={attachment.artifactId} onPress={() => onOpenImage({ uri, name: attachment.name, headers })}><Image source={{ uri, headers }} style={styles.messageImageAttachment} /></Pressable>
             : <View style={styles.messageAttachment} key={attachment.artifactId}><Ionicons name="document-outline" size={17} color={palette.secondary} /><Text numberOfLines={1} style={styles.messageAttachmentName}>{attachment.name}</Text></View>;
         })}
-        {message.content ? <Text style={styles.messageText}>{message.content}</Text> : null}
+        {message.content ? own ? <Text style={styles.messageText}>{message.content}</Text> : <MobileResponseContent content={message.content} parts={message.responseParts} /> : null}
         <Text style={styles.messageTime}>{timeLabel(message.createdAt)}</Text>
       </View>
     </View>
@@ -142,24 +155,31 @@ function ChatThread({
   agent,
   config,
   connected,
+  activeRun,
+  liveParts,
   onBack,
   onClear,
   onSend,
+  onStop,
 }: {
   state: RelayState;
   conversation: Conversation;
   agent: Agent;
   config: InstanceConfig;
   connected: boolean;
+  activeRun: Run | null;
+  liveParts?: MessageResponsePart[];
   onBack: () => void;
   onClear: (conversationId: string) => Promise<Conversation>;
   onSend: (conversationId: string, agentId: string, content: string, attachmentIds?: string[]) => Promise<void>;
+  onStop: (conversationId: string, agentId: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState("");
   const [computerOpen, setComputerOpen] = useState(false);
   const [commandBusy, setCommandBusy] = useState(false);
   const [loadedDraftId, setLoadedDraftId] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(80);
+  const [inputHeight, setInputHeight] = useState(COMPOSER_LINE_HEIGHT);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [attachments, setAttachments] = useState<Array<{ artifact: ArtifactRecord; previewUri: string | null }>>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
@@ -174,6 +194,7 @@ function ChatThread({
   );
   const commands = useMemo(() => matchingSlashCommands(draft), [draft]);
   const exactCommand = exactSlashCommand(draft);
+  const activityLabel = runActivityLabel(activeRun, liveParts, agent);
 
   useEffect(() => {
     let disposed = false;
@@ -196,10 +217,12 @@ function ChatThread({
   const runCommand = async (command: SlashCommand) => {
     if (commandBusy) return;
     setDraft("");
+    setInputHeight(COMPOSER_LINE_HEIGHT);
     void saveMessageDraft(conversation.id, "");
     setCommandBusy(true);
     try {
       if (command === "/clear") await onClear(conversation.id);
+      if (command === "/stop") await onStop(conversation.id, agent.id);
     } finally {
       setCommandBusy(false);
     }
@@ -220,6 +243,7 @@ function ChatThread({
     try {
       await onSend(conversation.id, agent.id, content, attachmentIds);
       setDraft("");
+      setInputHeight(COMPOSER_LINE_HEIGHT);
       void saveMessageDraft(conversation.id, "");
       setAttachments([]);
       setAttachmentMenuOpen(false);
@@ -305,7 +329,9 @@ function ChatThread({
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
       >
         {messages.map((message) => <MessageBubble config={config} key={message.id} message={message} onOpenImage={(image) => setFullscreenImage(image)} />)}
-        {messages.length === 0 ? <Text style={styles.empty}>No messages yet</Text> : null}
+        {liveParts?.length ? <View style={styles.liveResponse}><MobileResponseContent content={liveParts.filter((part) => part.type === "text").map((part) => part.type === "text" ? part.text : "").join("\n\n")} parts={liveParts} /></View> : null}
+        {activityLabel ? <View accessibilityLiveRegion="polite" style={styles.runActivity}><ShimmerText>{activityLabel}</ShimmerText></View> : null}
+        {messages.length === 0 && !activityLabel ? <Text style={styles.empty}>No messages yet</Text> : null}
       </KeyboardChatScrollView>
 
       <KeyboardStickyView onLayout={(event) => setComposerHeight(event.nativeEvent.layout.height)}>
@@ -341,18 +367,31 @@ function ChatThread({
               <Pressable accessibilityLabel="Add attachment" accessibilityRole="button" disabled={attachmentBusy || attachments.length >= 10} onPress={() => setAttachmentMenuOpen((open) => !open)} style={({ pressed }) => [styles.attachmentButton, pressed && styles.pressed, (attachmentBusy || attachments.length >= 10) && styles.sendDisabled]}><Ionicons name={attachmentMenuOpen ? "close" : "add"} size={25} color={palette.text} /></Pressable>
             </View>
             <View style={styles.composer}>
-              <TextInput
-                accessibilityLabel={`Message ${agent.name}`}
-                multiline
-                onChangeText={setDraft}
-                onSubmitEditing={submit}
-                placeholder="Message"
-                placeholderTextColor={palette.muted}
-                returnKeyType="send"
-                submitBehavior="submit"
-                style={styles.input}
-                value={draft}
-              />
+              <View style={[styles.inputShell, { height: Math.max(38, inputHeight) }]}>
+                <Text
+                  accessible={false}
+                  onTextLayout={(event) => setInputHeight(Math.min(COMPOSER_MAX_HEIGHT, Math.max(COMPOSER_LINE_HEIGHT, event.nativeEvent.lines.length * COMPOSER_LINE_HEIGHT)))}
+                  pointerEvents="none"
+                  style={styles.inputMeasure}
+                >
+                  {`${draft}\u200b`}
+                </Text>
+                <TextInput
+                  accessibilityLabel={`Message ${agent.name}`}
+                  blurOnSubmit={false}
+                  multiline
+                  onChangeText={(value) => {
+                    setDraft(value);
+                    if (!value) setInputHeight(COMPOSER_LINE_HEIGHT);
+                  }}
+                  placeholder="Message"
+                  placeholderTextColor={palette.muted}
+                  returnKeyType="default"
+                  scrollEnabled={inputHeight >= COMPOSER_MAX_HEIGHT}
+                  style={[styles.input, { height: inputHeight }]}
+                  value={draft}
+                />
+              </View>
               <Pressable
                 accessibilityLabel="Send message"
                 accessibilityRole="button"
@@ -380,18 +419,24 @@ export function ChatsScreen({
   config,
   connected,
   state,
+  runs,
+  liveResponses,
   onSelectConversation,
   onSend,
   onClear,
+  onStop,
   requestedConversationId,
   onRequestedConversationHandled,
 }: {
   config: InstanceConfig;
   connected: boolean;
   state: RelayState;
+  runs: Run[];
+  liveResponses: Record<string, MessageResponsePart[]>;
   onSelectConversation: (id: string | null) => void;
   onSend: (conversationId: string, agentId: string, content: string, attachmentIds?: string[]) => Promise<void>;
   onClear: (conversationId: string) => Promise<Conversation>;
+  onStop: (conversationId: string, agentId: string) => Promise<void>;
   requestedConversationId: string | null;
   onRequestedConversationHandled: () => void;
 }) {
@@ -399,6 +444,7 @@ export function ChatsScreen({
   const [connectorsOpen, setConnectorsOpen] = useState(false);
   const conversation = state.conversations.find((item) => item.id === openConversationId) ?? null;
   const agent = state.agents.find((item) => conversation?.memberAgentIds[0] === item.id) ?? null;
+  const activeRun = conversation && agent ? [...runs].reverse().find((run) => run.conversationId === conversation.id && run.agentId === agent.id && ["queued", "starting", "running", "waiting_approval", "waiting_user"].includes(run.status)) ?? null : null;
 
   useEffect(() => {
     if (openConversationId && !conversation) setOpenConversationId(null);
@@ -440,7 +486,7 @@ export function ChatsScreen({
   }
 
   if (conversation && agent) {
-    return <ChatThread state={state} conversation={conversation} agent={agent} config={config} connected={connected} onBack={back} onClear={clear} onSend={onSend} />;
+    return <ChatThread state={state} conversation={conversation} agent={agent} config={config} connected={connected} activeRun={activeRun} liveParts={activeRun ? liveResponses[activeRun.id] : undefined} onBack={back} onClear={clear} onSend={onSend} onStop={onStop} />;
   }
 
   return <AgentList state={state} onOpen={open} onOpenConnectors={() => setConnectorsOpen(true)} />;
@@ -505,7 +551,7 @@ const styles = StyleSheet.create({
   computerButtonActive: { backgroundColor: palette.bubbleOwn },
   messages: { flex: 1, backgroundColor: palette.black },
   messageContent: { paddingHorizontal: 10, paddingTop: 12, paddingBottom: 12 },
-  messageRow: { flexDirection: "row", marginBottom: 5, paddingRight: 54 },
+  messageRow: { flexDirection: "row", marginBottom: 5 },
   messageRowOwn: { justifyContent: "flex-end", paddingRight: 0, paddingLeft: 54 },
   messageBubble: {
     maxWidth: "100%",
@@ -517,7 +563,10 @@ const styles = StyleSheet.create({
     backgroundColor: palette.bubble,
   },
   messageBubbleOwn: { borderBottomLeftRadius: 16, borderBottomRightRadius: 5, backgroundColor: palette.bubbleOwn },
+  messageBubbleAgent: { width: "100%", paddingHorizontal: 7, paddingTop: 9, paddingBottom: 9, borderRadius: 0, backgroundColor: "transparent" },
   messageText: { color: palette.text, fontSize: 16, lineHeight: 21 },
+  liveResponse: { width: "100%", marginTop: 6, marginBottom: 12, paddingHorizontal: 7 },
+  runActivity: { width: "100%", minHeight: 30, justifyContent: "center", marginBottom: 10, paddingHorizontal: 7 },
   messageAttachment: { minWidth: 160, maxWidth: 260, flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.06)" },
   messageImageAttachment: { width: 180, height: 180, marginBottom: 6, borderRadius: 12 },
   messageAttachmentName: { flex: 1, color: palette.text, fontSize: 13 },
@@ -573,7 +622,9 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     backgroundColor: palette.composer,
   },
-  input: { flex: 1, minHeight: 38, maxHeight: 110, paddingTop: 9, paddingBottom: 8, color: palette.text, fontSize: 16 },
+  inputShell: { position: "relative", flex: 1, minHeight: 38, maxHeight: COMPOSER_MAX_HEIGHT, justifyContent: "center" },
+  inputMeasure: { position: "absolute", left: 0, right: 0, top: 0, opacity: 0, fontSize: 16, lineHeight: COMPOSER_LINE_HEIGHT },
+  input: { width: "100%", minHeight: COMPOSER_LINE_HEIGHT, maxHeight: COMPOSER_MAX_HEIGHT, paddingTop: 0, paddingBottom: 0, color: palette.text, fontSize: 16, lineHeight: COMPOSER_LINE_HEIGHT, textAlignVertical: "top" },
   sendButton: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: palette.send },
   sendDisabled: { opacity: 0.28 },
   pressed: { opacity: 0.62 },

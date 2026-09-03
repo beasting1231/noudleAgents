@@ -93,6 +93,24 @@ export const MessageAttachmentSchema = z.object({
   path: z.string().min(1).max(2_000),
 });
 
+export const ResponseTextPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string().max(200_000),
+});
+
+export const ResponseToolPartSchema = z.object({
+  type: z.literal("tool"),
+  id: IdSchema,
+  toolType: z.string().min(1).max(80),
+  status: z.enum(["running", "completed", "failed"]),
+  data: z.record(z.string(), z.unknown()),
+});
+
+export const MessageResponsePartSchema = z.discriminatedUnion("type", [
+  ResponseTextPartSchema,
+  ResponseToolPartSchema,
+]);
+
 export const MessageSchema = z.object({
   id: IdSchema,
   workspaceId: IdSchema,
@@ -100,6 +118,7 @@ export const MessageSchema = z.object({
   role: MessageRoleSchema,
   authorId: IdSchema.nullable(),
   content: z.string().max(200_000),
+  responseParts: z.array(MessageResponsePartSchema).max(500).optional(),
   attachments: z.array(MessageAttachmentSchema).max(10).optional(),
   replyToMessageId: IdSchema.nullable(),
   clientOperationId: z.string().max(160).nullable(),
@@ -384,6 +403,7 @@ export type Agent = z.infer<typeof AgentSchema>;
 export type AgentStatus = z.infer<typeof AgentStatusSchema>;
 export type Conversation = z.infer<typeof ConversationSchema>;
 export type Message = z.infer<typeof MessageSchema>;
+export type MessageResponsePart = z.infer<typeof MessageResponsePartSchema>;
 export type MessageAttachment = z.infer<typeof MessageAttachmentSchema>;
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;

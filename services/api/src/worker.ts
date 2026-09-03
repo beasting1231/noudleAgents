@@ -222,6 +222,9 @@ export class RunWorker {
         role: "agent",
         authorId: activeAgent.id,
         content: `${result.content}${suffix}`,
+        responseParts: result.responseParts?.length
+          ? [...result.responseParts, ...(suffix ? [{ type: "text" as const, text: suffix }] : [])]
+          : undefined,
         replyToMessageId: trigger.id,
         clientOperationId: null,
         createdAt: now,

@@ -449,6 +449,14 @@ export async function createRelayApp(options: CreateRelayAppOptions = {}): Promi
   app.post("/v1/approvals/:id/approve", (request) => service.resolveApproval(IdParamsSchema.parse(request.params).id, "approve"));
   app.post("/v1/approvals/:id/deny", (request) => service.resolveApproval(IdParamsSchema.parse(request.params).id, "deny"));
 
+  app.get("/v1/event-history", async (request) => {
+    const query = z.object({
+      after: z.coerce.number().int().nonnegative().default(0),
+      limit: z.coerce.number().int().min(1).max(1000).default(500),
+    }).parse(request.query);
+    return repository.listEvents(config.workspaceId, query.after, query.limit);
+  });
+
   registerArtifactRoutes(app, artifacts, config);
   registerComputerRoutes(app, computers, config);
 

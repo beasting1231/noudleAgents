@@ -1,5 +1,6 @@
 export const slashCommands = [
   { value: "/clear", label: "Clear chat", icon: "refresh-outline" },
+  { value: "/stop", label: "Stop agent", icon: "stop-circle-outline" },
 ] as const;
 
 export type SlashCommand = (typeof slashCommands)[number]["value"];

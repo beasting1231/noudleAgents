@@ -56,6 +56,17 @@ export interface ExecResult {
   stderr: string;
 }
 
+export interface DesktopInputResult {
+  computer: ComputerSession;
+  result: {
+    action: "type" | "key";
+    width: number;
+    height: number;
+    mimeType: "image/jpeg";
+    image: string;
+  };
+}
+
 export const safeTerminalActions = [
   { id: "pwd", label: "Current folder", command: ["pwd"] },
   { id: "list", label: "List files", command: ["ls", "-la"] },
@@ -191,6 +202,22 @@ export class WorkspaceApi {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
+    });
+  }
+
+  typeComputer(id: string, text: string): Promise<DesktopInputResult> {
+    return this.request("/v1/computers/desktop/action", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "type", computerId: id, text }),
+    });
+  }
+
+  keyComputer(id: string, key: "BACKSPACE" | "ENTER"): Promise<DesktopInputResult> {
+    return this.request("/v1/computers/desktop/action", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "key", computerId: id, key }),
     });
   }
 

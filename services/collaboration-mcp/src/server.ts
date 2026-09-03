@@ -16,6 +16,11 @@ function result(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], structuredContent: { data } };
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("noudleAgents returned an invalid object");
+  return value as Record<string, unknown>;
+}
+
 function withWebhookUrl(data: unknown) {
   const schedule = data && typeof data === "object" ? data as Record<string, unknown> : {};
   const id = typeof schedule.id === "string" ? schedule.id : "";
@@ -188,6 +193,88 @@ server.registerTool(
     inputSchema: { agentId: z.string().min(1) },
   },
   async ({ agentId: target }) => result(await client.request(`/v1/agents/${encodeURIComponent(target)}`)),
+);
+
+const agentConfigurationSchema = {
+  name: z.string().trim().min(1).max(80),
+  role: z.string().trim().min(1).max(120),
+  description: z.string().max(1200).optional(),
+  instructions: z.string().max(20_000).optional(),
+  avatar: z.string().max(12).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  capabilities: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+};
+
+server.registerTool(
+  "create_agent",
+  {
+    title: "Create a noudleAgents agent",
+    description: "Create and configure a persistent teammate. Agents have the same workspace, computer, connector, collaboration, and agent-management access as every other agent.",
+    inputSchema: agentConfigurationSchema,
+  },
+  async (input) => result(await client.request("/v1/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })),
+);
+
+server.registerTool(
+  "update_agent",
+  {
+    title: "Reconfigure a noudleAgents agent",
+    description: "Edit any persistent agent, including yourself. Changed identity, instructions, and capabilities apply when that agent's thread next resumes.",
+    inputSchema: {
+      agentId: z.string().min(1).max(160),
+      name: agentConfigurationSchema.name.optional(),
+      role: agentConfigurationSchema.role.optional(),
+      description: agentConfigurationSchema.description,
+      instructions: agentConfigurationSchema.instructions,
+      avatar: agentConfigurationSchema.avatar,
+      color: agentConfigurationSchema.color,
+      capabilities: agentConfigurationSchema.capabilities,
+    },
+  },
+  async ({ agentId: target, ...patch }) => result(await client.request(`/v1/agents/${encodeURIComponent(target)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  })),
+);
+
+server.registerTool(
+  "duplicate_agent",
+  {
+    title: "Duplicate a noudleAgents agent",
+    description: "Create a new persistent agent by copying another agent's configuration. Optionally give the copy a different name.",
+    inputSchema: {
+      agentId: z.string().min(1).max(160),
+      name: z.string().trim().min(1).max(80).optional(),
+    },
+  },
+  async ({ agentId: sourceAgentId, name }) => {
+    const source = asRecord(await client.request(`/v1/agents/${encodeURIComponent(sourceAgentId)}`));
+    return result(await client.request("/v1/agents", {
+      method: "POST",
+      body: JSON.stringify({
+        name: name ?? `${String(source.name).slice(0, 75)} Copy`,
+        role: source.role,
+        description: source.description,
+        instructions: source.instructions,
+        avatar: source.avatar,
+        color: source.color,
+        capabilities: source.capabilities,
+      }),
+    }));
+  },
+);
+
+server.registerTool(
+  "delete_agent",
+  {
+    title: "Delete a noudleAgents agent",
+    description: "Permanently delete any agent, including yourself. Use only when the user explicitly requests deletion or it is clearly required by the task. Agents with active work cannot be deleted.",
+    inputSchema: { agentId: z.string().min(1).max(160) },
+  },
+  async ({ agentId: target }) => result(await client.request(`/v1/agents/${encodeURIComponent(target)}`, { method: "DELETE" })),
 );
 
 server.registerTool(

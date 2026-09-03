@@ -132,6 +132,10 @@ export class RelayApiClient {
     return this.request("/v1/runs");
   }
 
+  listEvents(after: number, limit = 500): Promise<RelayEvent[]> {
+    return this.request(`/v1/event-history?after=${encodeURIComponent(String(after))}&limit=${encodeURIComponent(String(limit))}`);
+  }
+
   listSchedules(): Promise<Schedule[]> {
     return this.request("/v1/schedules");
   }

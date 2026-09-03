@@ -30,6 +30,16 @@ describe("WorkspaceApi", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://relay.local/v1/computers/computer-1/exec", expect.objectContaining({ method: "POST" }));
   });
 
+  it("forwards mobile keyboard text and control keys to the selected computer", async () => {
+    const payload = { computer: { id: "computer-1" }, result: { action: "type", width: 1280, height: 720, mimeType: "image/jpeg", image: "jpeg" } };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(JSON.stringify(payload), { status: 200 })));
+    const api = new WorkspaceApi("http://relay.local", "secret");
+    await api.typeComputer("computer-1", "hello");
+    await api.keyComputer("computer-1", "ENTER");
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://relay.local/v1/computers/desktop/action", expect.objectContaining({ body: JSON.stringify({ action: "type", computerId: "computer-1", text: "hello" }) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://relay.local/v1/computers/desktop/action", expect.objectContaining({ body: JSON.stringify({ action: "key", computerId: "computer-1", key: "ENTER" }) }));
+  });
+
   it("builds a stable authenticated computer view URL", () => {
     expect(new WorkspaceApi("https://relay.example.com/", "secret").computerViewUrl("computer/a b"))
       .toBe("https://relay.example.com/v1/computers/computer%2Fa%20b/view");

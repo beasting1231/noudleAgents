@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AgentSchema, ApprovalSchema, RunSchema, type Approval } from "@noudle-agents/protocol";
+import { AgentSchema, ApprovalSchema, RunSchema, type Approval, type MessageResponsePart } from "@noudle-agents/protocol";
 import type { RelayConfig } from "../config.js";
 import type { RelayRepository } from "../database/repository.js";
 import type { AgentRuntime, RuntimeContext, RuntimeEvent, RuntimeResult } from "./runtime.js";
@@ -46,6 +46,59 @@ function safeRuntimeItem(value: unknown): unknown {
   };
 }
 
+function clippedString(value: unknown, limit = 100_000): string | null {
+  return typeof value === "string" ? value.slice(0, limit) : null;
+}
+
+function responseToolPart(value: unknown, fallbackId: string, running: boolean): Extract<MessageResponsePart, { type: "tool" }> {
+  const item = asRecord(safeRuntimeItem(value));
+  const toolType = typeof item.type === "string" ? item.type : "tool";
+  const id = typeof item.id === "string" ? item.id : fallbackId;
+  const rawStatus = typeof item.status === "string" ? item.status.toLowerCase() : "";
+  const status = running || rawStatus.includes("progress") || rawStatus === "running"
+    ? "running"
+    : rawStatus.includes("fail") || rawStatus.includes("declin") || item.error
+      ? "failed"
+      : "completed";
+  let data: Record<string, unknown>;
+  if (toolType === "commandExecution") {
+    data = {
+      command: clippedString(item.command, 20_000), cwd: clippedString(item.cwd, 4_000),
+      output: clippedString(item.aggregatedOutput), exitCode: item.exitCode, durationMs: item.durationMs,
+    };
+  } else if (toolType === "fileChange") {
+    data = { changes: Array.isArray(item.changes) ? item.changes.slice(0, 100) : [], patchStatus: item.status };
+  } else if (toolType === "mcpToolCall" || toolType === "dynamicToolCall") {
+    data = {
+      server: item.server ?? item.namespace, tool: item.tool, arguments: item.arguments,
+      result: item.result ?? item.contentItems, error: item.error, durationMs: item.durationMs, appContext: item.appContext,
+    };
+  } else if (toolType === "webSearch") {
+    data = { query: item.query, action: item.action };
+  } else if (toolType === "imageView") {
+    data = { path: item.path };
+  } else if (toolType === "reasoning" || toolType === "plan") {
+    data = { summary: item.summary, text: item.text };
+  } else {
+    data = Object.fromEntries(Object.entries(item).filter(([key]) => !["id", "type", "status"].includes(key)));
+  }
+  return { type: "tool", id, toolType, status, data };
+}
+
+function agentDeveloperInstructions(context: RuntimeContext): string {
+  return [
+    `You are ${context.agent.name}, the ${context.agent.role} agent in noudleAgents.`,
+    context.agent.description,
+    context.agent.instructions,
+    "You are one member of a collaborating agent team. Use the relay_collaboration MCP tools to inspect peers, create or reconfigure agents, delegate bounded tasks, report blockers, and share results when that improves the outcome.",
+    "The team shares one trusted filesystem and one visible browser computer. Your normal working directory is /workspace/agents/<your-agent-id>. Team projects live in /workspace/projects and reusable team references live in /workspace/team. Every agent can access the full /workspace tree and operates the same shared browser computer.",
+    "Keep drafts and temporary work in your own agent directory. Put canonical project files in /workspace/projects/<project-name>. You may read another agent's directory when needed, but do not overwrite their active work without coordinating. Use request_agent_help when another agent's context or unfinished work is needed, and include exact file paths in handoffs.",
+    "When the user asks you to do something repeatedly or at a future recurring time, translate their timing into a five-field cron expression and use create_schedule. When they ask for an automation triggered by an incoming webhook, use create_webhook_job and return its private webhook URL. Use list_schedules, update_schedule, or delete_schedule when they ask to inspect or change existing jobs. Confirm the trigger after a successful tool call.",
+    "You have full agent-management access. You may create, inspect, edit, duplicate, delete, or reconfigure any agent, including yourself, when requested by the user or when it is useful to complete the team's work. Use the relay_collaboration agent tools instead of calling private endpoints. Preserve active work, and do not delete an agent unless the user explicitly asks or deletion is clearly required by the task.",
+    "Work only inside your assigned noudleAgents workspace. Be concise and evidence-driven.",
+  ].filter(Boolean).join("\n\n");
+}
+
 export class CodexAgentRuntime implements AgentRuntime {
   readonly name = "codex-app-server";
 
@@ -89,6 +142,7 @@ export class CodexAgentRuntime implements AgentRuntime {
 
   private async ensureThread(context: RuntimeContext): Promise<string> {
     const cwd = `${this.config.agentWorkspaceRoot}/${context.agent.id}`;
+    const developerInstructions = agentDeveloperInstructions(context);
     if (context.agent.codexThreadId) {
       try {
         const resumed = await this.request<{ threadId: string }>(
@@ -98,6 +152,7 @@ export class CodexAgentRuntime implements AgentRuntime {
             agentId: context.agent.id,
             model: context.settings?.model,
             speed: context.settings?.speed,
+            developerInstructions,
           }) },
         );
         return resumed.threadId;
@@ -113,17 +168,7 @@ export class CodexAgentRuntime implements AgentRuntime {
         agentId: context.agent.id,
         model: context.settings?.model,
         speed: context.settings?.speed,
-        developerInstructions: [
-          `You are ${context.agent.name}, the ${context.agent.role} agent in noudleAgents.`,
-          context.agent.description,
-          context.agent.instructions,
-          "You are one member of a collaborating agent team. Use the relay_collaboration MCP tools to inspect peers, delegate bounded tasks, report blockers, and share results when that improves the outcome.",
-          "The team shares one trusted filesystem and one visible browser computer. Your normal working directory is /workspace/agents/<your-agent-id>. Team projects live in /workspace/projects and reusable team references live in /workspace/team. Every agent can access the full /workspace tree and operates the same shared browser computer.",
-          "Keep drafts and temporary work in your own agent directory. Put canonical project files in /workspace/projects/<project-name>. You may read another agent's directory when needed, but do not overwrite their active work without coordinating. Use request_agent_help when another agent's context or unfinished work is needed, and include exact file paths in handoffs.",
-          "When the user asks you to do something repeatedly or at a future recurring time, translate their timing into a five-field cron expression and use create_schedule. When they ask for an automation triggered by an incoming webhook, use create_webhook_job and return its private webhook URL. Use list_schedules, update_schedule, or delete_schedule when they ask to inspect or change existing jobs. Confirm the trigger after a successful tool call.",
-          "You cannot configure yourself or any other agent. Never create, edit, duplicate, delete, or alter an agent's name, role, instructions, identity, permissions, model defaults, or capabilities. Only the workspace owner can manage agent configuration.",
-          "Work only inside your assigned noudleAgents workspace. Be concise and evidence-driven.",
-        ].filter(Boolean).join("\n\n"),
+        developerInstructions,
       }),
     });
     context.agent.codexThreadId = started.threadId;
@@ -140,7 +185,7 @@ export class CodexAgentRuntime implements AgentRuntime {
       ? `\n\nActive task: ${context.task.title}\nObjective: ${context.task.objective}\nAcceptance criteria:\n${context.task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- Complete the stated objective."}`
       : "";
     const computerGuidance = [
-      "Agent configuration is owner-controlled. You cannot create, edit, duplicate, delete, or alter yourself or any other agent, including names, roles, instructions, identity, permissions, model defaults, and capabilities. Do not attempt to call noudleAgents agent-management endpoints directly.",
+      "You have full agent-management access. You may create, inspect, edit, duplicate, delete, or reconfigure any agent, including yourself, using the relay_collaboration agent tools. Preserve active work, and only delete an agent when the user explicitly asks or deletion is clearly required by the task.",
       `You are part of the noudleAgents team. Your working directory is /workspace/${this.config.agentWorkspaceRoot}/${context.agent.id}. All agents share /workspace: use /workspace/projects for canonical project work, /workspace/team for shared references and policies, and /workspace/${this.config.agentWorkspaceRoot}/<agent-id> for agent-specific drafts. All agents also operate the same shared browser computer and browser profile.`,
       "Before starting substantial work, inspect the active task and relevant project directory. Keep project status and durable decisions in the project's shared files rather than only in chat. You may read a teammate's directory when needed; coordinate before modifying their active files. If you need a teammate's explanation, work-in-progress, or unpublished files, use request_agent_help with the relevant task and paths.",
       "When the user asks you to use the visible noudleAgents computer, operate it directly with the relay_collaboration computer tools. Start with computer_screenshot, then use computer_click, computer_type, computer_key, computer_scroll, computer_move, or computer_drag and inspect the returned screenshot after every action. Use browser_navigate only when direct URL navigation is helpful. The VM is remote; never try xdg-open, open, or a local desktop launcher.",
@@ -174,6 +219,24 @@ export class CodexAgentRuntime implements AgentRuntime {
     const decoder = new TextDecoder();
     let buffer = "";
     let content = "";
+    const responseParts: MessageResponsePart[] = [];
+    let activeTextPart: Extract<MessageResponsePart, { type: "text" }> | null = null;
+    const appendText = (text: string): void => {
+      content += text;
+      if (!activeTextPart) {
+        activeTextPart = { type: "text", text: "" };
+        responseParts.push(activeTextPart);
+      }
+      activeTextPart.text += text;
+    };
+    const upsertTool = (item: unknown, running: boolean): Extract<MessageResponsePart, { type: "tool" }> => {
+      const candidate = responseToolPart(item, `tool-${responseParts.length + 1}`, running);
+      const index = responseParts.findIndex((part) => part.type === "tool" && part.id === candidate.id);
+      if (index >= 0) responseParts[index] = candidate;
+      else responseParts.push(candidate);
+      activeTextPart = null;
+      return candidate;
+    };
     let completed = false;
     let agentMessageItems = 0;
     try {
@@ -192,27 +255,36 @@ export class CodexAgentRuntime implements AgentRuntime {
           const payload = asRecord(event.payload);
           if (event.type === "item/agentMessage/delta") {
             const delta = typeof payload.delta === "string" ? payload.delta : "";
-            content += delta;
+            appendText(delta);
             if (delta) await emit({ type: "message.delta", payload: { runId: context.run.id, turnId, delta } });
           } else if (event.type === "item/started") {
             const item = asRecord(payload.item);
             if (item.type === "agentMessage") {
               if (agentMessageItems > 0 && content && !content.endsWith("\n\n")) {
-                content += "\n\n";
+                appendText("\n\n");
                 await emit({ type: "message.delta", payload: { runId: context.run.id, turnId, delta: "\n\n" } });
               }
               agentMessageItems += 1;
             } else if (item.type) {
-              await emit({ type: "tool.started", payload: { turnId, item: safeRuntimeItem(item) } });
+              const part = upsertTool(item, true);
+              await emit({ type: "tool.started", payload: { turnId, item: safeRuntimeItem(item), part } });
             }
           } else if (event.type === "item/completed") {
             const item = asRecord(payload.item);
-            if (!content && item.type === "agentMessage" && typeof item.text === "string") content = item.text;
+            if (!content && item.type === "agentMessage" && typeof item.text === "string") appendText(item.text);
             if (item.type && item.type !== "agentMessage") {
-              await emit({ type: "tool.completed", payload: { turnId, item: safeRuntimeItem(item) } });
+              const part = upsertTool(item, false);
+              await emit({ type: "tool.completed", payload: { turnId, item: safeRuntimeItem(item), part } });
             }
           } else if (event.type === "item/commandExecution/outputDelta") {
+            const itemId = typeof payload.itemId === "string" ? payload.itemId : null;
+            const part = itemId ? responseParts.find((candidate) => candidate.type === "tool" && candidate.id === itemId) : null;
+            if (part?.type === "tool") part.data.output = `${typeof part.data.output === "string" ? part.data.output : ""}${typeof payload.delta === "string" ? payload.delta : ""}`.slice(0, 100_000);
             await emit({ type: "tool.output", payload: { turnId, delta: payload.delta ?? "" } });
+          } else if (event.type === "item/fileChange/patchUpdated") {
+            const itemId = typeof payload.itemId === "string" ? payload.itemId : null;
+            const part = itemId ? responseParts.find((candidate) => candidate.type === "tool" && candidate.id === itemId) : null;
+            if (part?.type === "tool" && Array.isArray(payload.changes)) part.data.changes = payload.changes;
           } else if (event.type === "relay/approvalRequested") {
             await this.handleApproval(context, asRecord(event.payload), emit, signal);
           } else if (event.type === "turn/completed") {
@@ -229,7 +301,11 @@ export class CodexAgentRuntime implements AgentRuntime {
       await reader.cancel().catch(() => undefined);
     }
     const normalized = content.trim() || "Codex completed the turn without a text response.";
-    return { content: normalized, summary: normalized.slice(0, 500) };
+    return {
+      content: normalized,
+      summary: normalized.slice(0, 500),
+      ...(responseParts.length ? { responseParts } : {}),
+    };
   }
 
   private async handleApproval(

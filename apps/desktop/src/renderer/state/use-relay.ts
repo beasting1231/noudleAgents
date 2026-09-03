@@ -7,6 +7,8 @@ import type {
   CreateAgentInput,
   CreateConversationInput,
   Message,
+  MessageResponsePart,
+  RelayEvent,
   Run,
 } from "@noudle-agents/protocol";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
@@ -44,6 +46,7 @@ export function useRelay() {
   const client = useMemo(configuredClient, []);
   const [state, dispatch] = useReducer(relayReducer, cloneDemo(), createInitialState);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [liveResponses, setLiveResponses] = useState<Record<string, MessageResponsePart[]>>({});
   const modeRef = useRef<"live" | "demo">("demo");
   const streamTimers = useRef<number[]>([]);
 
@@ -78,6 +81,33 @@ export function useRelay() {
     let refreshTimer: number | undefined;
     let queuedRefresh: number | undefined;
 
+    const captureLiveResponse = (event: RelayEvent) => {
+      if (event.type === "message.delta") {
+        const runId = typeof event.payload.runId === "string" ? event.payload.runId : event.aggregateId;
+        const delta = typeof event.payload.delta === "string" ? event.payload.delta : "";
+        if (!delta) return;
+        setLiveResponses((current) => {
+          const parts = [...(current[runId] ?? [])];
+          const last = parts.at(-1);
+          if (last?.type === "text") parts[parts.length - 1] = { ...last, text: last.text + delta };
+          else parts.push({ type: "text", text: delta });
+          return { ...current, [runId]: parts };
+        });
+      }
+      if (event.type === "tool.started" || event.type === "tool.completed") {
+        const raw = event.payload.part;
+        if (!raw || typeof raw !== "object" || (raw as { type?: unknown }).type !== "tool") return;
+        const part = raw as MessageResponsePart;
+        setLiveResponses((current) => {
+          const parts = [...(current[event.aggregateId] ?? [])];
+          const index = parts.findIndex((candidate) => candidate.type === "tool" && candidate.id === (part.type === "tool" ? part.id : ""));
+          if (index >= 0) parts[index] = part;
+          else parts.push(part);
+          return { ...current, [event.aggregateId]: parts };
+        });
+      }
+    };
+
     const refresh = () => {
       window.clearTimeout(queuedRefresh);
       queuedRefresh = window.setTimeout(async () => {
@@ -92,7 +122,7 @@ export function useRelay() {
     };
 
     if (state.connection === "live") {
-      closeEvents = client.subscribe(state.cursor, refresh, () => {
+      closeEvents = client.subscribe(state.cursor, (event) => { captureLiveResponse(event); refresh(); }, () => {
         dispatch({ type: "connection", connection: navigator.onLine ? "error" : "offline", message: "Live updates paused. Polling for changes." });
       });
       refreshTimer = window.setInterval(refresh, 12_000);
@@ -106,6 +136,14 @@ export function useRelay() {
       window.clearTimeout(queuedRefresh);
     };
   }, [client, state.connection, state.cursor]);
+
+  useEffect(() => {
+    const activeIds = new Set(runs.filter(({ status }) => ACTIVE_RUN_STATUSES.has(status)).map(({ id }) => id));
+    setLiveResponses((current) => {
+      const retained = Object.fromEntries(Object.entries(current).filter(([runId]) => activeIds.has(runId)));
+      return Object.keys(retained).length === Object.keys(current).length ? current : retained;
+    });
+  }, [runs]);
 
   useEffect(() => {
     const handleOffline = () => dispatch({ type: "connection", connection: "offline", message: "No network connection. Changes are not being sent." });
@@ -280,6 +318,7 @@ export function useRelay() {
   return {
     state,
     runs,
+    liveResponses,
     dispatch,
     client,
     retry: loadLiveSnapshot,

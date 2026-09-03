@@ -155,6 +155,7 @@ export class CodexProcess extends EventEmitter {
     agentId?: string | undefined;
     model?: string | undefined;
     speed?: "balanced" | "extra-fast" | undefined;
+    developerInstructions?: string | undefined;
   }): Promise<{ threadId: string }> {
     const client = await this.requireClient();
     const safeCwd = await this.resolveWorkspace(input.cwd);
@@ -163,6 +164,7 @@ export class CodexProcess extends EventEmitter {
       threadId,
       cwd: safeCwd,
       ...(input.model ? { model: input.model } : {}),
+      ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {}),
       approvalPolicy: "never",
       approvalsReviewer: "user",
       sandbox: "danger-full-access",

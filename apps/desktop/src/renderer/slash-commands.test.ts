@@ -19,9 +19,9 @@ describe("slash command activation", () => {
   });
 
   it("submits a selected command immediately", () => {
-    expect(resolveComposerEnter("/", true, ["/clear"], 0)).toEqual({
+    expect(resolveComposerEnter("/", true, ["/clear", "/stop"], 1)).toEqual({
       type: "submit-command",
-      value: "/clear",
+      value: "/stop",
     });
   });
 

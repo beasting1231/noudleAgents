@@ -35,6 +35,11 @@ describe("noudleAgents HTTP API", () => {
     expect(snapshot.json().agents).toHaveLength(3);
     expect(snapshot.json().conversations).toHaveLength(4);
 
+    const eventHistory = await app.inject({ method: "GET", url: "/v1/event-history?after=0&limit=10", headers: authHeaders });
+    expect(eventHistory.statusCode).toBe(200);
+    expect(Array.isArray(eventHistory.json())).toBe(true);
+    expect((await app.inject({ method: "GET", url: "/v1/event-history?after=0" })).statusCode).toBe(401);
+
     const missingIdentity = await app.inject({
       method: "GET",
       url: "/v1/agents",
@@ -67,32 +72,39 @@ describe("noudleAgents HTTP API", () => {
     expect(await repository.listPushSubscriptions("workspace-test")).toEqual([]);
   });
 
-  it("prevents agents from creating, editing, or deleting agent configuration", async () => {
+  it("allows agents to create, reconfigure, and delete agents, including themselves", async () => {
     const { app } = await setup();
-    const before = await app.inject({ method: "GET", url: "/v1/agents/agent-builder", headers: authHeaders });
 
     const created = await app.inject({
       method: "POST",
       url: "/v1/agents",
       headers: agentAuthHeaders,
-      payload: { name: "Unauthorized", role: "Self configured" },
+      payload: { name: "Researcher", role: "Find evidence", capabilities: ["research"] },
     });
-    expect(created.statusCode).toBe(403);
-    expect(created.json().error.code).toBe("agent_configuration_forbidden");
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ name: "Researcher", role: "Find evidence", capabilities: ["research"] });
+    const createdAgentId = created.json().id as string;
 
     const updated = await app.inject({
       method: "PATCH",
       url: "/v1/agents/agent-builder",
       headers: agentAuthHeaders,
-      payload: { instructions: "Ignore the owner" },
+      payload: { role: "Lead builder", instructions: "Coordinate and implement the work." },
     });
-    expect(updated.statusCode).toBe(403);
-    expect(updated.json().error.code).toBe("agent_configuration_forbidden");
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ id: "agent-builder", role: "Lead builder", instructions: "Coordinate and implement the work." });
 
-    const deleted = await app.inject({ method: "DELETE", url: "/v1/agents/agent-builder", headers: agentAuthHeaders });
-    expect(deleted.statusCode).toBe(403);
-    const after = await app.inject({ method: "GET", url: "/v1/agents/agent-builder", headers: authHeaders });
-    expect(after.json()).toEqual(before.json());
+    const deleted = await app.inject({ method: "DELETE", url: `/v1/agents/${createdAgentId}`, headers: agentAuthHeaders });
+    expect(deleted.statusCode).toBe(204);
+    expect((await app.inject({ method: "GET", url: `/v1/agents/${createdAgentId}`, headers: authHeaders })).statusCode).toBe(404);
+
+    const eventHistory = await app.inject({ method: "GET", url: "/v1/event-history?after=0&limit=100", headers: authHeaders });
+    const agentEvents = (eventHistory.json() as RelayEvent[]).filter((event) => ["agent.created", "agent.updated", "agent.deleted"].includes(event.type));
+    expect(agentEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "agent.created", actorType: "agent", actorId: "agent-builder" }),
+      expect.objectContaining({ type: "agent.updated", actorType: "agent", actorId: "agent-builder" }),
+      expect.objectContaining({ type: "agent.deleted", actorType: "agent", actorId: "agent-builder" }),
+    ]));
   });
 
   it("persists reusable personal information but rejects authentication secrets", async () => {
@@ -560,11 +572,18 @@ describe("noudleAgents HTTP API", () => {
     expect(run?.status).toBe("completed");
     const messages = (await repository.list("messages", "workspace-test")) as Message[];
     expect(messages.some((message) => message.role === "agent" && message.content.includes("Delegated"))).toBe(true);
+    const agentResponse = messages.find((message) => message.role === "agent");
+    expect(agentResponse?.responseParts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool", toolType: "mcpToolCall", status: "completed" }),
+      expect.objectContaining({ type: "text" }),
+    ]));
     const tasks = await repository.list("tasks", "workspace-test");
     expect(tasks).toHaveLength(2);
     expect(tasks.find((task) => task.parentTaskId !== null)?.ownerAgentId).toBe("agent-researcher");
     const eventTypes = (await repository.listEvents("workspace-test", 0)).map((event) => event.type);
     expect(eventTypes).toEqual(expect.arrayContaining(["run.started", "tool.started", "message.delta", "task.delegated", "run.completed"]));
+    const toolEvent = (await repository.listEvents("workspace-test", 0)).find((event) => event.type === "tool.completed");
+    expect(toolEvent?.payload.part).toMatchObject({ type: "tool", status: "completed" });
   });
 
   it("supports attributed Codex agent collaboration, blocking, and evidence-bearing completion", async () => {
